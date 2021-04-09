@@ -32,6 +32,7 @@ SYSTEM	      = @system@
 GUI_EXE       = @GUI_EXE@
 GUI_TARGET    = @GUI_TARGET@
 QT_CFLAGS     = @QT_CFLAGS@
+QT_PATH       = $(shell [ -n "$(QMAKE)" ] && python -c "import os; print(os.path.realpath(os.path.dirname(os.path.realpath(\"$$(command -v $(QMAKE))\")) + \"/..\"))")# TOREMOVE (see usage)
 REFLECTOR_TARGET = bin/hd-rum-transcode$(EXEEXT)
 TEST_TARGET  = bin/run_tests$(EXEEXT)
 
@@ -622,6 +623,11 @@ $(GUI_BUNDLE)/Contents/libs: $(BUNDLE)/Contents/libs $(GUI_BUNDLE)
 	cp -R $(BUNDLE)/Contents/Frameworks/* $(GUI_BUNDLE)/Contents/Frameworks
 	# add Qt frameworks
 	command -v macdeployqt && macdeployqt $(GUI_BUNDLE) -verbose=2 -executable=$(GUI_BUNDLE)/Contents/MacOS/uv -executable=$(GUI_BUNDLE)/Contents/MacOS/hd-rum-transcode
+	# TODO: TOREMOVE - currently macdeployqt doesn't deploy transitive dependencies. Recheck or deploy Frameworks with dylibbundler. Remove also manual plugins copy. Perhaps only temporary issue of Qt6 macdeployqt
+	if [ -d $(QT_PATH)/lib/QtDBus.framework -a ! -d $(GUI_BUNDLE)/Contents/Frameworks/QtDBus.framework ] && `otool -L $(GUI_BUNDLE)/Contents/Frameworks/QtGui.framework/Versions/A/QtGui | grep -q '@rpath/QtDBus'`; then cp -a $(QT_PATH)/lib/QtDBus.framework $(GUI_BUNDLE)/Contents/Frameworks; \
+		$(DYLIBBUNDLER) -of -p @executable_path/../libs/ -cd -b -x $(GUI_BUNDLE)/Contents/Frameworks/QtDBus.framework/QtDBus -d $(GUI_BUNDLE)/Contents/libs; fi
+	if [ -d $(QT_PATH)/share/qt/plugins -a ! -d $(GUI_BUNDLE)/Contents/PlugIns ]; then cp -r $(QT_PATH)/share/qt/plugins $(GUI_BUNDLE)/Contents/PlugIns; fi
+	
 	test -d $(GUI_BUNDLE)/Contents/Resources || mkdir $(GUI_BUNDLE)/Contents/Resources
 	cp data/icon.icns $(GUI_BUNDLE)/Contents/Resources
 	cp data/update.mac $(GUI_BUNDLE)/Contents/MacOS/update
