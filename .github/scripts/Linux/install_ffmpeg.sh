@@ -2,6 +2,7 @@
 
 cd /var/tmp/ffmpeg
 ( cd libvpx && sudo make install )
+( cd msdk/build && sudo rm -rf /usr/local/include/mfx && sudo cp -r tmpinst/include /usr/local/include/mfx && sudo cp -nr tmpinst/{lib,plugins} /usr/local || exit 1 )
 ( cd x264 && sudo make install )
 ( cd nv-codec-headers && sudo make install )
 ( cd aom/build && sudo cmake --install . )
