@@ -31,6 +31,10 @@ sudo apt install libasound-dev libjack-jackd2-dev libnatpmp-dev libv4l-dev porta
 # for FFmpeg - libzmq3-dev needs to be ignored (cannot be installed, see run #380)
 FFMPEG_BUILD_DEP=`apt-cache showsrc ffmpeg | grep Build-Depends: | sed 's/Build-Depends://' | tr ',' '\n' |cut -f 2 -d\  | grep -v libzmq3-dev`
 sudo apt install $FFMPEG_BUILD_DEP
+if [ -n "$(apt-cache search --names-only '^libmfx-dev$')" ]; then
+        sudo apt install libmfx-dev
+        echo "FFMPEG_ENABLE_MFX= --enable-libmfx" >> $GITHUB_ENV
+fi
 sudo apt-get -y remove 'libavcodec*' 'libavutil*' 'libswscale*' libvpx-dev 'libx264*' nginx
 sudo apt --no-install-recommends install asciidoc xmlto
 
