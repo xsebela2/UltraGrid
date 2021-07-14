@@ -83,6 +83,10 @@ if [ -f $(echo $APPPREFIX/lib/libva.so.* | cut -d\  -f 1) ]; then
         done
 fi
 
+if [ -f $(echo $APPPREFIX/lib/libmfx.so.* | cut -d\  -f 1) ]; then
+        cp -a /usr/lib/x86_64-linux-gnu/libmfxhw64.so.1 $APPPREFIX/lib
+fi
+
 cp $srcdir/data/scripts/Linux-AppImage/AppRun $srcdir/data/ultragrid.png $APPDIR
 cp $srcdir/data/uv-qt.desktop $APPDIR/ultragrid.desktop
 APPIMAGEUPDATETOOL=$(command -v appimageupdatetool-x86_64.AppImage || true)
