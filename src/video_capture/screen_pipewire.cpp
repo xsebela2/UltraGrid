@@ -192,14 +192,52 @@ static void on_stream_io_changed(void *_data, uint32_t id, void *area, uint32_t 
     }
 }
 
-static void on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param) {
-    (void) _data;
+static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct spa_pod *param) {
+    auto &session = *static_cast<screen_cast_session*>(session_ptr);
     (void) id;
-    (void) param;
+    std::cout << "[cap_pipewire] param changed:\n" << std::endl;
+    spa_debug_format(2, nullptr, param);
+    pw_stream_update_params(session.stream, &param, 1);
+
 }
 
-static void on_process(void *_data) {
-    (void) _data;
+static void on_process(void *session_ptr) {
+    auto &session = *static_cast<screen_cast_session*>(session_ptr);
+    pw_stream* stream = session.stream; 
+    
+    std::cout<<"on_process"<<std::endl;
+
+    pw_buffer *buffer = nullptr;
+    while (true) {
+        struct pw_buffer *temp = pw_stream_dequeue_buffer(stream);
+        if (temp == nullptr)
+            break;
+        if (buffer)
+            pw_stream_queue_buffer(stream, buffer);
+        buffer = temp;
+    }
+
+    if (buffer == nullptr) {
+        pw_log_warn("out of buffers: %m");
+        return;
+    }
+
+    pw_stream_queue_buffer(stream, buffer);
+}
+
+static void on_drained(void*)
+{
+    std::cout<<"drained\n"<<std::endl;
+}
+
+static void on_add_buffer(void *data, struct pw_buffer *buffer)
+{
+     std::cout<<"add_buffer\n"<<std::endl;
+}
+
+static void on_remove_buffer(void *data, struct pw_buffer *buffer)
+{
+     std::cout<<"remove_buffer\n"<<std::endl;
 }
 
 static const struct pw_stream_events stream_events = {
@@ -207,7 +245,10 @@ static const struct pw_stream_events stream_events = {
         .state_changed = on_stream_state_changed,
         .io_changed = on_stream_io_changed,
         .param_changed = on_stream_param_changed,
+        .add_buffer = on_add_buffer,
+        .remove_buffer = on_remove_buffer,
         .process = on_process,
+        .drained = on_drained,
 };
 
 const struct spa_pod *params[2];
@@ -219,14 +260,14 @@ static int start_pipewire(screen_cast_session &session)
 
     session.loop = pw_thread_loop_new("pipewire_thread_loop", nullptr);
     assert(session.loop != nullptr);
+    pw_thread_loop_lock(session.loop);
     pw_context *context = pw_context_new(pw_thread_loop_get_loop(session.loop), nullptr, 0);
     assert(context != nullptr);
 
-    if (pw_thread_loop_start(session.loop) < 0) {
+    if (pw_thread_loop_start(session.loop) != 0) {
         assert(false && "error starting pipewire thread loop");
     }
 
-    pw_thread_loop_lock(session.loop);
 
     int new_pipewire_fd = fcntl(session.pipewire_fd, F_DUPFD_CLOEXEC, 5);
     std::cout << "duplicating fd " << session.pipewire_fd << " -> " << new_pipewire_fd << std::endl;
@@ -396,7 +437,7 @@ static void run_screencast(std::promise<void> screen_cast_is_ready) {
 
         portal_call(session.connection, session.screencast_proxy, session_handle, "SelectSources",
                     {
-                            {"types",    g_variant_new_uint32(2)}, // 1 full screen, 2 - a window, 3 - both
+                            {"types",    g_variant_new_uint32(1)}, // 1 full screen, 2 - a window, 3 - both
                             {"multiple", g_variant_new_boolean(false)}
                     },
                     sources_selected
@@ -434,8 +475,7 @@ static int vidcap_screen_pipewire_init(struct vidcap_params *params, void **stat
     (void) state;
     
     std::cout<<"[cap_pipewire] init\n";
-    pw_init(0, nullptr);
-
+    pw_init(&uv_argc, &uv_argv);
 
     std::promise<void> screen_cast_is_ready_promise;
     std::future<void> screen_cast_is_ready = screen_cast_is_ready_promise.get_future();
@@ -455,7 +495,8 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *state, struct audio
 {
     (void) audio;
     (void) state;
-    std::cout<<"[cap_pipewire] grab\n";
+    //std::cout<<"[cap_pipewire] grab\n";
+
     //exit(0);
     return nullptr;
 }
