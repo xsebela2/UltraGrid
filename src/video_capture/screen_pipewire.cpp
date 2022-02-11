@@ -251,6 +251,22 @@ static const struct pw_stream_events stream_events = {
         .drained = on_drained,
 };
 
+static void on_core_error_cb(void *user_data, uint32_t id, int seq, int res,
+                             const char *message) {
+    printf("[on_core_error_cb] Error id:%u seq:%d res:%d (%s): %s", id,
+           seq, res, strerror(res), message);
+}
+
+static void on_core_done_cb(void *user_data, uint32_t id, int seq) {
+    printf("[on_core_done_cb] user_data=%p id=%d seq=%d", user_data, id, seq);
+}
+
+static const struct pw_core_events core_events = {
+        PW_VERSION_CORE_EVENTS,
+        .done = on_core_done_cb,
+        .error = on_core_error_cb,
+};
+
 const struct spa_pod *params[2];
 
 static int start_pipewire(screen_cast_session &session)
@@ -274,6 +290,8 @@ static int start_pipewire(screen_cast_session &session)
     pw_core *core = pw_context_connect_fd(context, new_pipewire_fd, nullptr,
                                           0); //why does obs dup the fd?
     assert(core != nullptr);
+
+    pw_core_add_listener(core, &data.core_listener, &core_events, &data);
 
     session.stream = pw_stream_new(core, "my_screencast", pw_properties_new(
             PW_KEY_MEDIA_TYPE, "Video",
