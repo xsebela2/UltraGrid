@@ -291,7 +291,7 @@ static int start_pipewire(screen_cast_session &session)
                                           0); //why does obs dup the fd?
     assert(core != nullptr);
 
-    pw_core_add_listener(core, &data.core_listener, &core_events, &data);
+    pw_core_add_listener(core, &session.core_listener, &core_events, &session);
 
     session.stream = pw_stream_new(core, "my_screencast", pw_properties_new(
             PW_KEY_MEDIA_TYPE, "Video",
