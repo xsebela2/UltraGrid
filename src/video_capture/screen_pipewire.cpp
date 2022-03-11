@@ -25,6 +25,7 @@
 #include "video.h"
 #include "video_capture.h"
 #include "concurrent_queue/readerwritercircularbuffer.h"
+#include "concurrent_queue/readerwriterqueue.h"
 
 
 uint64_t MY_time_since_epoch_ms()
@@ -215,7 +216,7 @@ struct screen_cast_session {
     char padding3[1000];
 
     moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> blank_frames {BLANK_FRAMES_QUEUE_SIZE};
-    moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
+    moodycamel::ReaderWriterQueue<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
     //synchronized_queue<video_frame*, QUEUE_SIZE*2> blank_frames;
     //synchronized_queue<video_frame*, QUEUE_SIZE> sending_frames;
 
@@ -390,19 +391,19 @@ static void on_process(void *session_ptr) {
     int n_buffers_from_pw = 0;
     while((buffer = pw_stream_dequeue_buffer(session.stream)) != nullptr){    
         ++n_buffers_from_pw;
-        
+        /*
         if(session.dequed_blank_frame == nullptr)
         {
             session.dequed_blank_frame = session.new_blank_frame();
         }
+        */
         
-        /*
         if(session.dequed_blank_frame == nullptr && !session.blank_frames.try_dequeue(session.dequed_blank_frame))
         {
             //std::cout << "dropping - no blank frame" << std::endl;
             pw_stream_queue_buffer(session.stream, buffer);
             continue;
-        }*/
+        }
             
 
         if(buffer == nullptr){
@@ -743,15 +744,14 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct
     
     if(session.in_flight_frame != nullptr){
         auto timer = Stopwatch::create("enqueue blank", 0);
-        vf_free(session.in_flight_frame);
-        //session.blank_frames.wait_enqueue(session.in_flight_frame);
+        session.blank_frames.wait_enqueue(session.in_flight_frame);
     }
     
     session.in_flight_frame = nullptr;
 
     {
         auto timer = Stopwatch::create("dequeue sending", 0);
-        while(!session.sending_frames.try_dequeue(session.in_flight_frame)){};
+        session.sending_frames.try_dequeue(session.in_flight_frame);
     }
     
     return session.in_flight_frame;
