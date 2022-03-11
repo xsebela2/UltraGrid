@@ -16,12 +16,57 @@
 #include <spa/param/props.h>
 #include <spa/debug/format.h>
 #include <atomic>
+#include <chrono>
 
+#include "utils/synchronized_queue.h"
 #include "debug.h"
 #include "host.h"
 #include "lib_common.h"
 #include "video.h"
 #include "video_capture.h"
+#include "concurrent_queue/readerwritercircularbuffer.h"
+
+
+uint64_t MY_time_since_epoch_ms()
+{
+    struct timeval  tv;
+    gettimeofday(&tv, NULL);
+
+    return (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000 ; 
+}
+
+class Stopwatch
+{
+    const char *name;
+    std::chrono::time_point<std::chrono::steady_clock> begin_time;
+    int64_t threshold;
+    
+    Stopwatch (const char *name, int64_t threshold)
+        :name(name), threshold(threshold)
+    {
+        begin_time = std::chrono::steady_clock::now();
+    }
+
+public:
+    static [[nodiscard]] Stopwatch create(const char *name, int64_t threshold = -1)
+    {
+        return Stopwatch(name, threshold);
+    }
+
+    ~Stopwatch(){
+        auto now = std::chrono::steady_clock::now();
+        auto delta = std::chrono::duration_cast< std::chrono::milliseconds>(now-begin_time).count();
+        if(delta>threshold){
+            std::cout << "Stopwatch \"" << name << "\" took " << delta << " ms"<<std::endl;
+        }
+    }
+};
+
+#define MAX_BUFFERS 4
+static constexpr int SENDING_FRAMES_QUEUE_SIZE = 3;
+static constexpr int BLANK_FRAMES_QUEUE_SIZE = 8;//SENDING_FRAMES_QUEUE_SIZE*2;
+static constexpr int BLANK_FRAMES_COUNT = 8;//(3*SENDING_FRAMES_QUEUE_SIZE)/4;
+static_assert(BLANK_FRAMES_COUNT <= BLANK_FRAMES_QUEUE_SIZE);
 
 
 struct request_path_t {
@@ -160,10 +205,49 @@ struct screen_cast_session {
     //int32_t output_line_size = 0;
     struct spa_rectangle size = {};
 
-    // TODO: atomically exchange the pointer instead of a mutex?
-    std::mutex frame_mutex;
-    struct video_frame *frame;
+    char padding1[1000];
+    // used exlusively by ultragrid thread
+    struct video_frame *in_flight_frame = nullptr;
+    char padding2[1000];
+
+    // used exclusively by pipewire thread
+    struct video_frame *dequed_blank_frame = nullptr;
+    char padding3[1000];
+
+    moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> blank_frames {BLANK_FRAMES_QUEUE_SIZE};
+    moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
+    //synchronized_queue<video_frame*, QUEUE_SIZE*2> blank_frames;
+    //synchronized_queue<video_frame*, QUEUE_SIZE> sending_frames;
+
+    //std::condition_variable next_frame_ready_cond;
+    //volatile bool next_frame_ready = false;
+    //bool next_frame_sent = false;
+    //std::mutex next_frame_ready_mutex;
+
+    //std::mutex frame_mutex; // held when swapping current and next frame;
+    //struct video_frame *current_frame = nullptr;  // frame that has been returned by grab
+    
+    //struct video_frame *frame = nullptr; // the frame that will be returned by grab next
+    
     std::promise<void> screen_cast_is_ready;
+
+    struct video_frame *new_blank_frame()
+    {
+        struct video_frame *frame = vf_alloc(1);
+        frame->color_spec = RGBA;
+        frame->interlacing = PROGRESSIVE;
+        frame->fps = 60;
+        frame->callbacks.data_deleter = vf_data_deleter;
+        
+        struct tile* tile = vf_get_tile(frame, 0);
+        assert(tile != nullptr);
+        tile->width = size.width; //TODO
+        tile->height = size.height; //TODO
+
+        tile->data_len = vc_get_linesize(tile->width, frame->color_spec) * tile->height;
+        tile->data = (char *) malloc(tile->data_len);
+        return frame;
+    }
 
     ~screen_cast_session() {
         pw_thread_loop_stop(loop);
@@ -202,8 +286,6 @@ static void on_stream_io_changed(void *_data, uint32_t id, void *area, uint32_t 
             break;
     }
 }
-
-#define MAX_BUFFERS  64
 
 static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct spa_pod *param) {
     auto &session = *static_cast<screen_cast_session*>(session_ptr);
@@ -277,6 +359,11 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
     );
 
     pw_stream_update_params(session.stream, params, 4);
+
+    for(int i = 0; i < BLANK_FRAMES_COUNT; ++i)
+        session.blank_frames.wait_enqueue(session.new_blank_frame());
+    
+    session.screen_cast_is_ready.set_value();
 }
 
 void copy_bgra_to_rgba(char *dest, char *src, int width, int height) {
@@ -293,64 +380,67 @@ void copy_bgra_to_rgba(char *dest, char *src, int width, int height) {
 }
 
 static void on_process(void *session_ptr) {
-    auto &session = *static_cast<screen_cast_session*>(session_ptr);
-    pw_stream* stream = session.stream; 
-    
-    std::cout<<"on_process"<<std::endl;
+    screen_cast_session &session = *static_cast<screen_cast_session*>(session_ptr);
+    //std::cout<<"on process"<<std::endl;
+    static int frame_count = 0;
+    static uint64_t begin_time = time_since_epoch_in_ms();
 
-    pw_buffer *buffer = nullptr;
-    while (true) {
-        struct pw_buffer *temp = pw_stream_dequeue_buffer(stream);
-        if (temp == nullptr)
-            break;
-        if (buffer)
-            pw_stream_queue_buffer(stream, buffer);
-        buffer = temp;
+
+    pw_buffer *buffer;
+    int n_buffers_from_pw = 0;
+    while((buffer = pw_stream_dequeue_buffer(session.stream)) != nullptr){    
+        ++n_buffers_from_pw;
+        
+        if(session.dequed_blank_frame == nullptr)
+        {
+            session.dequed_blank_frame = session.new_blank_frame();
+        }
+        
+        /*
+        if(session.dequed_blank_frame == nullptr && !session.blank_frames.try_dequeue(session.dequed_blank_frame))
+        {
+            //std::cout << "dropping - no blank frame" << std::endl;
+            pw_stream_queue_buffer(session.stream, buffer);
+            continue;
+        }*/
+            
+
+        if(buffer == nullptr){
+            std::cout<<"pipewire is out of buffers"<<std::endl;
+            return;
+        }
+
+        assert(buffer->buffer != nullptr);
+        assert(buffer->buffer->datas != nullptr);
+        assert(buffer->buffer->datas[0].data != nullptr);
+        //memcpy(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.height * vc_get_linesize(session.size.width, RGBA));
+        copy_bgra_to_rgba(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.width, session.size.height);
+        
+        // try to enque the frame, if not possible drop it
+        if(!session.sending_frames.try_enqueue(session.dequed_blank_frame))
+        {
+            //std::cout << "dropping - sending queue is full" << std::endl;
+            pw_stream_queue_buffer(session.stream, buffer);
+            continue;
+        }
+        
+        session.dequed_blank_frame = nullptr;
+        pw_stream_queue_buffer(session.stream, buffer);
+        
+        ++frame_count;
+        uint64_t time_now = time_since_epoch_in_ms();
+
+        uint64_t delta = time_now - begin_time;
+        if(delta >= 5000) {
+            std::cout<<"average fps in last 5 seconds: " <<  frame_count / (delta / 1000.0) << std::endl;
+            frame_count = 0;
+            begin_time = time_since_epoch_in_ms();
+        }
     }
 
-    if (buffer == nullptr) {
-        pw_log_warn("out of buffers: %m");
-        return;
-    }
-
-    struct video_frame* frame = vf_alloc(1);
-    frame->color_spec = RGBA; //TODO: or BGRx (BGRA)?
-    frame->interlacing = PROGRESSIVE;
-    frame->fps = 30; //TODO
-    frame->callbacks.data_deleter = vf_data_deleter;
-    
-    struct tile* tile = vf_get_tile(frame, 0);
-    tile->width = session.size.width; //TODO
-    tile->height = session.size.height; //TODO
-
-    tile->data_len = vc_get_linesize(tile->width, frame->color_spec) * tile->height;
-    tile->data = (char *) malloc(tile->data_len);
-    
-    char *src = static_cast<char*>(buffer->buffer->datas[0].data);
-    char *dest = tile->data;
-    int linesize = buffer->buffer->datas[0].chunk->stride;
-    
-    assert(linesize == vc_get_linesize(tile->width, frame->color_spec));
-    if (src == nullptr) {
-        std::cout<<"no data"<<std::endl;
-        pw_stream_queue_buffer(stream, buffer);
-        return;
-    }
-
-    //TODO: try to do the bgra to rgba conversion inplace + memcpy
-    copy_bgra_to_rgba(dest, src, session.size.width, session.size.height);
-    //memcpy(dest, src, session.size.height*linesize);
-    
-    //copy memory while converting BGRA -> RGBA
- 
-    std::lock_guard<std::mutex> frame_guard(session.frame_mutex);
-    // if the frame is nullptr it hasn't been returned by grab, 
-    // but we already have a newer frame so we free it and update the frame to a newer one
-    vf_free(session.frame); //this is noop if frame is nullptr
-
-    session.frame = frame;
-
-    pw_stream_queue_buffer(stream, buffer);
+    static uint8_t counter = 0;
+    if( (++counter)%40 == 0)
+        std::cout<<"from pw: "<< n_buffers_from_pw << "\t sending: "<<session.sending_frames.size_approx() << "\t blank: " << session.blank_frames.size_approx() << std::endl;
 }
 
 static void on_drained(void*)
@@ -528,7 +618,6 @@ static void run_screencast(screen_cast_session *session_ptr) {
         assert(session->pipewire_fd != -1);
         assert(session->pipewire_node != -1);
         
-        session->screen_cast_is_ready.set_value();
         std::cout<<"starting pipewire"<<std::endl;
         start_pipewire(*session);
         //screen_cast_is_ready.set_value(); //FIXME
@@ -635,6 +724,7 @@ static int vidcap_screen_pipewire_init(struct vidcap_params *params, void **stat
     std::thread dbus_thread(run_screencast, session);
     ready.wait();
     dbus_thread.detach();
+    std::cout<<"ready"<<std::endl;
     return VIDCAP_INIT_OK;
 }
 
@@ -645,18 +735,26 @@ static void vidcap_screen_pipewire_done(void *session_ptr)
 }
 
 static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct audio_frame **audio)
-{
-    //TODO: dont send a frame that has already been sent
+{    
+    using namespace std::chrono_literals;
     assert(session_ptr != nullptr);
-    //usleep(1000);
     auto &session = *static_cast<screen_cast_session*>(session_ptr);
-    audio = nullptr;
-    std::lock_guard<std::mutex> frame_guard(session.frame_mutex);
-    struct video_frame *frame = session.frame;
-    if (frame != nullptr)
-        std::cout<<"grab"<<std::endl;
-    session.frame = nullptr;
-    return frame;
+    *audio = nullptr;
+    
+    if(session.in_flight_frame != nullptr){
+        auto timer = Stopwatch::create("enqueue blank", 0);
+        vf_free(session.in_flight_frame);
+        //session.blank_frames.wait_enqueue(session.in_flight_frame);
+    }
+    
+    session.in_flight_frame = nullptr;
+
+    {
+        auto timer = Stopwatch::create("dequeue sending", 0);
+        while(!session.sending_frames.try_dequeue(session.in_flight_frame)){};
+    }
+    
+    return session.in_flight_frame;
 }
 
 static const struct video_capture_info vidcap_screen_pipewire_info = {
@@ -664,7 +762,7 @@ static const struct video_capture_info vidcap_screen_pipewire_info = {
     vidcap_screen_pipewire_init,
     vidcap_screen_pipewire_done,
     vidcap_screen_pipewire_grab,
-    false, //TODO what is this?
+    true, //TODO what is this?
 };
 
 REGISTER_MODULE(screen_pipewire, &vidcap_screen_pipewire_info, LIBRARY_CLASS_VIDEO_CAPTURE, VIDEO_CAPTURE_ABI_VERSION);
