@@ -64,9 +64,9 @@ public:
 };
 
 #define MAX_BUFFERS 4
-static constexpr int SENDING_FRAMES_QUEUE_SIZE = 3;
-static constexpr int BLANK_FRAMES_QUEUE_SIZE = 8;//SENDING_FRAMES_QUEUE_SIZE*2;
-static constexpr int BLANK_FRAMES_COUNT = 8;//(3*SENDING_FRAMES_QUEUE_SIZE)/4;
+static constexpr int SENDING_FRAMES_QUEUE_SIZE = 5;
+static constexpr int BLANK_FRAMES_QUEUE_SIZE = 6;//SENDING_FRAMES_QUEUE_SIZE*2;
+static constexpr int BLANK_FRAMES_COUNT = 6;//(3*SENDING_FRAMES_QUEUE_SIZE)/4;
 static_assert(BLANK_FRAMES_COUNT <= BLANK_FRAMES_QUEUE_SIZE);
 
 
@@ -216,7 +216,7 @@ struct screen_cast_session {
     char padding3[1000];
 
     moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> blank_frames {BLANK_FRAMES_QUEUE_SIZE};
-    moodycamel::ReaderWriterQueue<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
+    moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
     //synchronized_queue<video_frame*, QUEUE_SIZE*2> blank_frames;
     //synchronized_queue<video_frame*, QUEUE_SIZE> sending_frames;
 
@@ -416,14 +416,17 @@ static void on_process(void *session_ptr) {
         assert(buffer->buffer->datas[0].data != nullptr);
         //memcpy(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.height * vc_get_linesize(session.size.width, RGBA));
         copy_bgra_to_rgba(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.width, session.size.height);
+        session.sending_frames.wait_enqueue(session.dequed_blank_frame);
         
         // try to enque the frame, if not possible drop it
+        #if 0
         if(!session.sending_frames.try_enqueue(session.dequed_blank_frame))
         {
             //std::cout << "dropping - sending queue is full" << std::endl;
             pw_stream_queue_buffer(session.stream, buffer);
             continue;
         }
+        #endif
         
         session.dequed_blank_frame = nullptr;
         pw_stream_queue_buffer(session.stream, buffer);
@@ -433,7 +436,7 @@ static void on_process(void *session_ptr) {
 
         uint64_t delta = time_now - begin_time;
         if(delta >= 5000) {
-            std::cout<<"average fps in last 5 seconds: " <<  frame_count / (delta / 1000.0) << std::endl;
+            std::cout<<"on process: average fps in last 5 seconds: " <<  frame_count / (delta / 1000.0) << std::endl;
             frame_count = 0;
             begin_time = time_since_epoch_in_ms();
         }
@@ -741,19 +744,24 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct
     assert(session_ptr != nullptr);
     auto &session = *static_cast<screen_cast_session*>(session_ptr);
     *audio = nullptr;
-    
+    //auto stopwatch = Stopwatch::create("_grab", 0);
+   
     if(session.in_flight_frame != nullptr){
-        auto timer = Stopwatch::create("enqueue blank", 0);
+        //auto stopwatch = Stopwatch::create("enqueue blank", 0);
         session.blank_frames.wait_enqueue(session.in_flight_frame);
     }
     
     session.in_flight_frame = nullptr;
 
     {
-        auto timer = Stopwatch::create("dequeue sending", 0);
-        session.sending_frames.try_dequeue(session.in_flight_frame);
+        //auto stopwatch = Stopwatch::create("dequeue sending", 0);
+        /*
+        for(int i =0; i<128; ++i){
+            if(session.sending_frames.try_dequeue(session.in_flight_frame))
+                break;
+        }*/
+        session.sending_frames.wait_dequeue(session.in_flight_frame);
     }
-    
     return session.in_flight_frame;
 }
 
