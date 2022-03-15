@@ -25,6 +25,7 @@
 #include "video_capture.h"
 #include "concurrent_queue/readerwritercircularbuffer.h"
 #include "concurrent_queue/readerwriterqueue.h"
+#include "spa/support/dbus.h"
 
 
 class Stopwatch
@@ -56,8 +57,8 @@ public:
 
 #define MAX_BUFFERS 2
 static constexpr int SENDING_FRAMES_QUEUE_SIZE = 4;
-static constexpr int BLANK_FRAMES_QUEUE_SIZE = 6;//SENDING_FRAMES_QUEUE_SIZE*2;
-static constexpr int BLANK_FRAMES_COUNT = 6;//(3*SENDING_FRAMES_QUEUE_SIZE)/4;
+static constexpr int BLANK_FRAMES_QUEUE_SIZE = 6;
+static constexpr int BLANK_FRAMES_COUNT = 6;
 static_assert(BLANK_FRAMES_COUNT <= BLANK_FRAMES_QUEUE_SIZE);
 
 
@@ -209,18 +210,6 @@ struct screen_cast_session {
 
     moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> blank_frames {BLANK_FRAMES_QUEUE_SIZE};
     moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
-    //synchronized_queue<video_frame*, QUEUE_SIZE*2> blank_frames;
-    //synchronized_queue<video_frame*, QUEUE_SIZE> sending_frames;
-
-    //std::condition_variable next_frame_ready_cond;
-    //volatile bool next_frame_ready = false;
-    //bool next_frame_sent = false;
-    //std::mutex next_frame_ready_mutex;
-
-    //std::mutex frame_mutex; // held when swapping current and next frame;
-    //struct video_frame *current_frame = nullptr;  // frame that has been returned by grab
-    
-    //struct video_frame *frame = nullptr; // the frame that will be returned by grab next
     
     std::promise<void> screen_cast_is_ready;
 
@@ -383,12 +372,7 @@ static void on_process(void *session_ptr) {
     int n_buffers_from_pw = 0;
     while((buffer = pw_stream_dequeue_buffer(session.stream)) != nullptr){    
         ++n_buffers_from_pw;
-        /*
-        if(session.dequed_blank_frame == nullptr)
-        {
-            session.dequed_blank_frame = session.new_blank_frame();
-        }
-        */
+
         
         if(session.dequed_blank_frame == nullptr && !session.blank_frames.try_dequeue(session.dequed_blank_frame))
         {
@@ -408,15 +392,8 @@ static void on_process(void *session_ptr) {
         assert(buffer->buffer->datas[0].data != nullptr);
         //memcpy(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.height * vc_get_linesize(session.size.width, RGBA));
         copy_bgra_to_rgba(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.width, session.size.height);
-        //session.sending_frames.wait_enqueue(session.dequed_blank_frame);
         
-        // try to enque the frame, if not possible drop it
-        if(!session.sending_frames.try_enqueue(session.dequed_blank_frame))
-        {
-            //std::cout << "dropping - sending queue is full" << std::endl;
-            pw_stream_queue_buffer(session.stream, buffer);
-            continue;
-        }
+        session.sending_frames.wait_enqueue(session.dequed_blank_frame);
         
         session.dequed_blank_frame = nullptr;
         pw_stream_queue_buffer(session.stream, buffer);
