@@ -20,21 +20,12 @@
 
 #include "utils/synchronized_queue.h"
 #include "debug.h"
-#include "host.h"
 #include "lib_common.h"
 #include "video.h"
 #include "video_capture.h"
 #include "concurrent_queue/readerwritercircularbuffer.h"
 #include "concurrent_queue/readerwriterqueue.h"
 
-
-uint64_t MY_time_since_epoch_ms()
-{
-    struct timeval  tv;
-    gettimeofday(&tv, NULL);
-
-    return (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000 ; 
-}
 
 class Stopwatch
 {
@@ -57,7 +48,7 @@ public:
     ~Stopwatch(){
         auto now = std::chrono::steady_clock::now();
         auto delta = std::chrono::duration_cast< std::chrono::milliseconds>(now-begin_time).count();
-        if(delta>threshold){
+        if (delta > threshold){
             std::cout << "Stopwatch \"" << name << "\" took " << delta << " ms"<<std::endl;
         }
     }
@@ -155,6 +146,7 @@ static void portal_call(GDBusConnection *connection, GDBusProxy *screencast_prox
                                        [](gpointer user_data) { delete static_cast< PortalCallCallback * >(user_data); });
 
     auto call_finished = [](GObject *source_object, GAsyncResult *result, gpointer user_data) {
+        (void) user_data;
         GError *error = nullptr;
         GVariant *result_finished = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object), result, &error);
         g_assert_no_error(error);
@@ -260,10 +252,10 @@ struct screen_cast_session {
     }
 };
 
-static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
-    (void) old;
-    auto *data = static_cast<screen_cast_session*>(_data);
-    printf("stream state: \"%s\"\n", pw_stream_state_as_string(state));
+static void on_stream_state_changed(void *session_ptr, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
+    (void) session_ptr;
+
+    printf("stream state change : \"%s\" -> \"%s\"\n", pw_stream_state_as_string(old), pw_stream_state_as_string(state));
     printf("error: %s\n", error ? error : "(nullptr)");
     switch (state) {
         case PW_STREAM_STATE_UNCONNECTED:
@@ -367,7 +359,7 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
     session.screen_cast_is_ready.set_value();
 }
 
-void copy_bgra_to_rgba(char *dest, char *src, int width, int height) {
+static void copy_bgra_to_rgba(char *dest, char *src, int width, int height) {
     int linesize = 4*width;
     for (int line_offset = 0; line_offset < height * linesize; line_offset += linesize) {
         for(int x = 0; x < 4*width; x += 4) {
@@ -450,35 +442,44 @@ static void on_drained(void*)
     std::cout<<"drained\n"<<std::endl;
 }
 
-static void on_add_buffer(void *data, struct pw_buffer *buffer)
+static void on_add_buffer(void *session_ptr, struct pw_buffer *)
 {
-     std::cout<<"add_buffer\n"<<std::endl;
+    (void) session_ptr;
+
+    std::cout<<"add_buffer\n"<<std::endl;
 }
 
-static void on_remove_buffer(void *data, struct pw_buffer *buffer)
+static void on_remove_buffer(void *session_ptr, struct pw_buffer *)
 {
-     std::cout<<"remove_buffer\n"<<std::endl;
+    (void) session_ptr;
+    std::cout<<"remove_buffer\n"<<std::endl;
 }
 
 static const struct pw_stream_events stream_events = {
         PW_VERSION_STREAM_EVENTS,
+        .destroy = nullptr,
         .state_changed = on_stream_state_changed,
+        .control_info = nullptr,
         .io_changed = on_stream_io_changed,
         .param_changed = on_stream_param_changed,
         .add_buffer = on_add_buffer,
         .remove_buffer = on_remove_buffer,
         .process = on_process,
         .drained = on_drained,
+        .command = nullptr,
+        .trigger_done = nullptr,
 };
 
-static void on_core_error_cb(void *user_data, uint32_t id, int seq, int res,
+static void on_core_error_cb(void *session_ptr, uint32_t id, int seq, int res,
                              const char *message) {
+    (void) session_ptr;
     printf("[on_core_error_cb] Error id:%u seq:%d res:%d (%s): %s", id,
            seq, res, strerror(res), message);
 }
 
-static void on_core_done_cb(void *user_data, uint32_t id, int seq) {
-    printf("[on_core_done_cb] user_data=%p id=%d seq=%d", user_data, id, seq);
+static void on_core_done_cb(void *session_ptr, uint32_t id, int seq) {
+    (void) session_ptr;
+    printf("[on_core_done_cb] id=%d seq=%d", id, seq);
 }
 
 static const struct pw_core_events core_events = {
@@ -580,7 +581,7 @@ static void run_screencast(screen_cast_session *session_ptr) {
     auto& session = *session_ptr;
 
     session.pipewire_fd = -1;
-    session.pipewire_node = -1;
+    session.pipewire_node = UINT32_MAX;
     session.dbus_loop = g_main_loop_new(nullptr, false);
 
     GError *error = nullptr;
@@ -618,7 +619,7 @@ static void run_screencast(screen_cast_session *session_ptr) {
         g_assert_no_error(error);
 
         assert(session->pipewire_fd != -1);
-        assert(session->pipewire_node != -1);
+        assert(session->pipewire_node != UINT32_MAX);
         
         std::cout<<"starting pipewire"<<std::endl;
         start_pipewire(*session);
@@ -753,9 +754,7 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct
 
     {
         //auto stopwatch = Stopwatch::create("dequeue sending", 0);
-        
         session.sending_frames.wait_dequeue(session.in_flight_frame);
-        //session.sending_frames.wait_dequeue(session.in_flight_frame);
     }
     return session.in_flight_frame;
 }
@@ -765,7 +764,7 @@ static const struct video_capture_info vidcap_screen_pipewire_info = {
     vidcap_screen_pipewire_init,
     vidcap_screen_pipewire_done,
     vidcap_screen_pipewire_grab,
-    true, //TODO what is this?
+    true,
 };
 
 REGISTER_MODULE(screen_pipewire, &vidcap_screen_pipewire_info, LIBRARY_CLASS_VIDEO_CAPTURE, VIDEO_CAPTURE_ABI_VERSION);
