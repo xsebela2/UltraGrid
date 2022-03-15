@@ -63,8 +63,8 @@ public:
     }
 };
 
-#define MAX_BUFFERS 4
-static constexpr int SENDING_FRAMES_QUEUE_SIZE = 5;
+#define MAX_BUFFERS 2
+static constexpr int SENDING_FRAMES_QUEUE_SIZE = 4;
 static constexpr int BLANK_FRAMES_QUEUE_SIZE = 6;//SENDING_FRAMES_QUEUE_SIZE*2;
 static constexpr int BLANK_FRAMES_COUNT = 6;//(3*SENDING_FRAMES_QUEUE_SIZE)/4;
 static_assert(BLANK_FRAMES_COUNT <= BLANK_FRAMES_QUEUE_SIZE);
@@ -416,17 +416,15 @@ static void on_process(void *session_ptr) {
         assert(buffer->buffer->datas[0].data != nullptr);
         //memcpy(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.height * vc_get_linesize(session.size.width, RGBA));
         copy_bgra_to_rgba(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.width, session.size.height);
-        session.sending_frames.wait_enqueue(session.dequed_blank_frame);
+        //session.sending_frames.wait_enqueue(session.dequed_blank_frame);
         
         // try to enque the frame, if not possible drop it
-        #if 0
         if(!session.sending_frames.try_enqueue(session.dequed_blank_frame))
         {
             //std::cout << "dropping - sending queue is full" << std::endl;
             pw_stream_queue_buffer(session.stream, buffer);
             continue;
         }
-        #endif
         
         session.dequed_blank_frame = nullptr;
         pw_stream_queue_buffer(session.stream, buffer);
@@ -755,12 +753,9 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct
 
     {
         //auto stopwatch = Stopwatch::create("dequeue sending", 0);
-        /*
-        for(int i =0; i<128; ++i){
-            if(session.sending_frames.try_dequeue(session.in_flight_frame))
-                break;
-        }*/
+        
         session.sending_frames.wait_dequeue(session.in_flight_frame);
+        //session.sending_frames.wait_dequeue(session.in_flight_frame);
     }
     return session.in_flight_frame;
 }
