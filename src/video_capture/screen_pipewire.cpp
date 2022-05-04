@@ -99,11 +99,6 @@ public:
     
     void call(const char* method_name, std::initializer_list<GVariant*> arguments, GVariantBuilder &params_builder, PortalCallCallback on_response) {
         assert(method_name != nullptr);
-        //G_VARIANT_TYPE_VARDICT
-        //TODO: assert params_builder type assert( == G_VARIANT_TYPE_VARDICT);
-        //g_variant_builder_get_type
-        //g_variant_builder_get_type(&params_builder);
-        
         request_path_t request_path = request_path_t::create(sender_name);
         
         auto callback = [](GDBusConnection *connection, const gchar *sender_name, const gchar *object_path,
@@ -152,25 +147,17 @@ public:
         }
         g_variant_builder_add_value(&args_builder, g_variant_builder_end(&params_builder));
 
-        g_dbus_proxy_call(screencast_proxy, method_name, g_variant_builder_end(&args_builder), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, call_finished, screencast_proxy);
-    /*
-    GVariant *args = nullptr;
-    if (object_path == nullptr) {
-        args = g_variant_new("(a{sv})", &options_builder);
-    } else if (strcmp(method_name, "Start") == 0) { // FIXME: horrible hack
-        assert(g_variant_is_object_path(object_path));
-        args = g_variant_new("(osa{sv})", object_path, "", &options_builder);
-    } else {
-        assert(g_variant_is_object_path(object_path));
-        args = g_variant_new("(oa{sv})", object_path, &options_builder);
-    }*/
-        
+        g_dbus_proxy_call(screencast_proxy, method_name, g_variant_builder_end(&args_builder), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, call_finished, screencast_proxy);     
     }   
 };
 
-struct screen_cast_session {
-    GMainLoop *dbus_loop = nullptr;
+struct screen_cast_session { 
 
+    struct {
+        bool show_cursor = false;
+    } user_options;
+
+    GMainLoop *dbus_loop = nullptr;
     int pipewire_fd = -1;
     uint32_t pipewire_node = -1;
     
@@ -187,10 +174,8 @@ struct screen_cast_session {
     //int32_t output_line_size = 0;
     struct spa_rectangle size = {};
 
-    char padding1[1000];
     // used exlusively by ultragrid thread
     struct video_frame *in_flight_frame = nullptr;
-    char padding2[1000];
 
     // used exclusively by pipewire thread
     moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> blank_frames {BLANK_FRAMES_QUEUE_SIZE};
@@ -550,7 +535,7 @@ static int start_pipewire(screen_cast_session &session)
 
 static void run_screencast(screen_cast_session *session_ptr) {
     auto& session = *session_ptr;
-    
+
     session.pipewire_fd = -1;
     session.pipewire_node = UINT32_MAX;
     session.dbus_loop = g_main_loop_new(nullptr, false);
@@ -666,7 +651,10 @@ static void run_screencast(screen_cast_session *session_ptr) {
             g_variant_builder_init(&params, G_VARIANT_TYPE_VARDICT);
             g_variant_builder_add(&params, "{sv}", "types", g_variant_new_uint32(3)); // 1 full screen, 2 - a window, 3 - both
             g_variant_builder_add(&params, "{sv}", "multiple", g_variant_new_boolean(false));
-            //g_variant_builder_add(&params, "{sv}", "cursor_mode", g_variant_new_uint32(2));
+            if(session.user_options.show_cursor)
+                g_variant_builder_add(&params, "{sv}", "cursor_mode", g_variant_new_uint32(2));
+            
+            
             // {"cursor_mode", g_variant_new_uint32(4)}
             portal.call("SelectSources", {g_variant_new_object_path(session_path.path.c_str())}, params, sources_selected);
         }
@@ -703,10 +691,30 @@ static struct vidcap_type * vidcap_screen_pipewire_probe(bool verbose, void (**d
 
 static int vidcap_screen_pipewire_init(struct vidcap_params *params, void **state)
 {
-    (void) params;
-    
+    if (vidcap_params_get_flags(params) & VIDCAP_FLAG_AUDIO_ANY) {
+        return VIDCAP_INIT_AUDIO_NOT_SUPPOTED;
+    }
+
     screen_cast_session *session = new screen_cast_session();
     *state = session;
+
+    if(vidcap_params_get_fmt(params)) {
+        std::cout<<"fmt: '" << vidcap_params_get_fmt(params)<<"'" << "\n";
+        
+        std::string params_string = vidcap_params_get_fmt(params);
+        
+        if (params_string == "help") {
+                //TODO
+                //show_help();
+                //free(s);
+                //TODO
+                return VIDCAP_INIT_NOERR;
+        } else if (params_string == "showcursor") {
+            session->user_options.show_cursor = true;
+        } else if (params_string == "persistant") {
+            //TODO
+        }
+    }
     
     LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: [cap_pipewire] init\n";
     pw_init(&uv_argc, &uv_argv);
