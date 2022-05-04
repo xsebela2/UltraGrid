@@ -17,6 +17,7 @@
 #include <spa/debug/format.h>
 #include <atomic>
 #include <chrono>
+#include <fstream>
 
 #include "utils/synchronized_queue.h"
 #include "debug.h"
@@ -25,7 +26,7 @@
 #include "video_capture.h"
 #include "concurrent_queue/readerwritercircularbuffer.h"
 #include "concurrent_queue/readerwriterqueue.h"
-#include "spa/support/dbus.h"
+
 
 #define MAX_BUFFERS 30
 static constexpr int SENDING_FRAMES_QUEUE_SIZE = 50;
@@ -155,6 +156,7 @@ struct screen_cast_session {
 
     struct {
         bool show_cursor = false;
+        std::string persistence_filename = "";
     } user_options;
 
     GMainLoop *dbus_loop = nullptr;
@@ -595,6 +597,14 @@ static void run_screencast(screen_cast_session *session_ptr) {
             g_main_loop_quit(session.dbus_loop);
             return;
         }
+
+        const char *restore_token = nullptr;
+        if (g_variant_lookup(result, "restore_token", "s", &restore_token)){
+            std::ofstream file(session.user_options.persistence_filename);
+            std::cout<<"DEBUG:::: '"<<restore_token<<"'\n";
+            file<<restore_token;
+        }
+
         GVariant *streams = g_variant_lookup_value(result, "streams", G_VARIANT_TYPE_ARRAY);
         GVariant *stream_properties;
         GVariantIter iter;
@@ -618,13 +628,14 @@ static void run_screencast(screen_cast_session *session_ptr) {
         LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: selected sources: " << pretty << "\n";
         g_free((gpointer) pretty);
 
-        uint32_t result;
+        uint32_t status;
         GVariant *response;
-        g_variant_get(parameters, "(u@a{sv})", &result, &response);
-        assert(result == 0 && "Failed to select sources");
+        g_variant_get(parameters, "(u@a{sv})", &status, &response);
+        assert(status == 0 && "Failed to select sources"); //todo: LOG
+        
         g_variant_unref(response);
         //portal_call(connection, screencast_proxy, session_path.path.c_str(), "Start", {}, started);
-
+        
         {
             GVariantBuilder params;
             g_variant_builder_init(&params, G_VARIANT_TYPE_VARDICT);
@@ -633,10 +644,10 @@ static void run_screencast(screen_cast_session *session_ptr) {
     };
 
     auto session_created = [&](GVariant *parameters) {
-        guint32 response;
+        guint32 response; //TODO: rename to status
         const char *session_handle;
         
-        GVariant *result;
+        GVariant *result; //TODO: rename to respone
         g_variant_get(parameters, "(u@a{sv})", &response, &result);
         assert(response == 0 && "Failed to create session");
         g_variant_lookup(result, "session_handle", "s", &session_handle);
@@ -654,7 +665,22 @@ static void run_screencast(screen_cast_session *session_ptr) {
             if(session.user_options.show_cursor)
                 g_variant_builder_add(&params, "{sv}", "cursor_mode", g_variant_new_uint32(2));
             
-            
+            if(!session.user_options.persistence_filename.empty()){
+                std::string token;
+                std::ifstream file(session.user_options.persistence_filename);
+
+                if(file.is_open()) {
+                    std::ostringstream ss;
+                    ss << file.rdbuf();
+                    token = ss.str();
+                }
+                
+                //  0: Do not persist (default), 1: Permissions persist as long as the application is running, 2: Permissions persist until explicitly revoked
+                g_variant_builder_add(&params, "{sv}", "persist_mode", g_variant_new_uint32(2)); 
+                if(!token.empty())
+                    g_variant_builder_add(&params, "{sv}", "restore_token", g_variant_new_string(token.c_str())); 
+            }
+
             // {"cursor_mode", g_variant_new_uint32(4)}
             portal.call("SelectSources", {g_variant_new_object_path(session_path.path.c_str())}, params, sources_selected);
         }
@@ -711,8 +737,8 @@ static int vidcap_screen_pipewire_init(struct vidcap_params *params, void **stat
                 return VIDCAP_INIT_NOERR;
         } else if (params_string == "showcursor") {
             session->user_options.show_cursor = true;
-        } else if (params_string == "persistant") {
-            //TODO
+        } else if (params_string == "persistent") {
+            session->user_options.persistence_filename = "screen-pw.token";
         }
     }
     

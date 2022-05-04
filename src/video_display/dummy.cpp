@@ -51,6 +51,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <memory>
 
 const size_t DEFAULT_DUMP_LEN = 32;
 const constexpr char *MOD_NAME = "[dummy] ";
