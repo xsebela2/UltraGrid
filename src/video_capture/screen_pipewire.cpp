@@ -27,38 +27,10 @@
 #include "concurrent_queue/readerwriterqueue.h"
 #include "spa/support/dbus.h"
 
-
-class Stopwatch
-{
-    const char *name;
-    std::chrono::time_point<std::chrono::steady_clock> begin_time;
-    int64_t threshold;
-    
-    Stopwatch (const char *name, int64_t threshold)
-        :name(name), threshold(threshold)
-    {
-        begin_time = std::chrono::steady_clock::now();
-    }
-
-public:
-    static [[nodiscard]] Stopwatch create(const char *name, int64_t threshold = -1)
-    {
-        return Stopwatch(name, threshold);
-    }
-
-    ~Stopwatch(){
-        auto now = std::chrono::steady_clock::now();
-        auto delta = std::chrono::duration_cast< std::chrono::milliseconds>(now-begin_time).count();
-        if (delta > threshold){
-            LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: Stopwatch \"" << name << "\" took " << delta << " ms\n";
-        }
-    }
-};
-
-#define MAX_BUFFERS 2
-static constexpr int SENDING_FRAMES_QUEUE_SIZE = 60;
-static constexpr int BLANK_FRAMES_QUEUE_SIZE = 60;
-static constexpr int BLANK_FRAMES_COUNT = 60;
+#define MAX_BUFFERS 30
+static constexpr int SENDING_FRAMES_QUEUE_SIZE = 50;
+static constexpr int BLANK_FRAMES_QUEUE_SIZE = 50;
+static constexpr int BLANK_FRAMES_COUNT = 50;
 static_assert(BLANK_FRAMES_COUNT <= BLANK_FRAMES_QUEUE_SIZE);
 
 
@@ -108,77 +80,93 @@ unsigned int session_path_t::token_counter = 0;
 
 using PortalCallCallback = std::function<void(GVariant *parameters)>;
 
-static void portal_call(GDBusConnection *connection, GDBusProxy *screencast_proxy, const char *object_path,
-                 const char *method_name,
-                 std::initializer_list<std::pair<const char *, GVariant * >> options,
-                 PortalCallCallback on_response) {
-    assert(screencast_proxy != nullptr);
-    assert(method_name != nullptr);
+class Portal {
+private:
+    std::string object_path;
+    GDBusConnection *connection;
+    GDBusProxy *screencast_proxy;
+    std::string sender_name;
+public:
+    Portal(GDBusConnection *connection, GDBusProxy *screencast_proxy) 
+        : connection(connection), screencast_proxy(screencast_proxy)
+    {
+        assert(connection != nullptr);
+        assert(screencast_proxy != nullptr);
 
-    std::string sender_name = g_dbus_connection_get_unique_name(connection) + 1;
-    std::replace(sender_name.begin(), sender_name.end(), '.', '_');
-    request_path_t request_path = request_path_t::create(sender_name);
-
-
-    auto callback = [](GDBusConnection *connection, const gchar *sender_name, const gchar *object_path,
-                       const gchar *interface_name, const gchar *signal_name, GVariant *parameters,
-                       gpointer user_data) {
-        (void) sender_name;
-        (void) interface_name;
-        (void) signal_name;
-        
-        static_cast<PortalCallCallback *> (user_data)->operator()(parameters);
-        
-        //TODO: check if this actually works
-        g_dbus_connection_call(
-                connection, "org.freedesktop.portal.Desktop",
-                object_path, "org.freedesktop.portal.Request", "Close",
-                nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
-    };
-
-    g_dbus_connection_signal_subscribe(connection, "org.freedesktop.portal.Desktop",
-                                       "org.freedesktop.portal.Request",
-                                       "Response",
-                                       request_path.path.c_str(),
-                                       nullptr,
-                                       G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
-                                       callback,
-                                       new PortalCallCallback{std::move(on_response)},
-                                       [](gpointer user_data) { delete static_cast< PortalCallCallback * >(user_data); });
-
-    auto call_finished = [](GObject *source_object, GAsyncResult *result, gpointer user_data) {
-        (void) user_data;
-        GError *error = nullptr;
-        GVariant *result_finished = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object), result, &error);
-        g_assert_no_error(error);
-        const char *path = nullptr;
-        g_variant_get(result_finished, "(o)", &path);
-        g_variant_unref(result_finished);
-        LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: call finished: " << path << "\n";
-    };
-
-    GVariantBuilder builder;
-    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-
-    for (auto &[key, value] : options) {
-        g_variant_builder_add(&builder, "{sv}", key, value);
+        sender_name = g_dbus_connection_get_unique_name(connection) + 1;
+        std::replace(sender_name.begin(), sender_name.end(), '.', '_');
     }
+    
+    void call(const char* method_name, std::initializer_list<GVariant*> arguments, GVariantBuilder &params_builder, PortalCallCallback on_response) {
+        assert(method_name != nullptr);
+        //G_VARIANT_TYPE_VARDICT
+        //TODO: assert params_builder type assert( == G_VARIANT_TYPE_VARDICT);
+        //g_variant_builder_get_type
+        //g_variant_builder_get_type(&params_builder);
+        
+        request_path_t request_path = request_path_t::create(sender_name);
+        
+        auto callback = [](GDBusConnection *connection, const gchar *sender_name, const gchar *object_path,
+                    const gchar *interface_name, const gchar *signal_name, GVariant *parameters,
+                    gpointer user_data) {
+            (void) sender_name;
+            (void) interface_name;
+            (void) signal_name;
+            
+            static_cast<PortalCallCallback *> (user_data)->operator()(parameters);
+            //TODO: delete callback
+            //TODO: check if this actually works
+            g_dbus_connection_call(connection, "org.freedesktop.portal.Desktop",
+                    object_path, "org.freedesktop.portal.Request", "Close",
+                    nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
+        };
 
-    g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string(request_path.token.c_str()));
+        g_dbus_connection_signal_subscribe(connection, "org.freedesktop.portal.Desktop",
+                                        "org.freedesktop.portal.Request",
+                                        "Response",
+                                        request_path.path.c_str(),
+                                        nullptr,
+                                        G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
+                                        callback,
+                                        new PortalCallCallback{std::move(on_response)},
+                                        [](gpointer user_data) { delete static_cast< PortalCallCallback * >(user_data); });
 
+        auto call_finished = [](GObject *source_object, GAsyncResult *result, gpointer user_data) {
+            (void) user_data;
+            GError *error = nullptr;
+            GVariant *result_finished = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object), result, &error);
+            g_assert_no_error(error);
+            const char *path = nullptr;
+            g_variant_get(result_finished, "(o)", &path);
+            g_variant_unref(result_finished);
+            LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: call finished: " << path << "\n";
+        };
+
+
+        g_variant_builder_add(&params_builder, "{sv}", "handle_token", g_variant_new_string(request_path.token.c_str()));
+        
+        GVariantBuilder args_builder;
+        g_variant_builder_init(&args_builder, G_VARIANT_TYPE_TUPLE);
+        for(GVariant* arg : arguments){
+            g_variant_builder_add_value(&args_builder, arg);
+        }
+        g_variant_builder_add_value(&args_builder, g_variant_builder_end(&params_builder));
+
+        g_dbus_proxy_call(screencast_proxy, method_name, g_variant_builder_end(&args_builder), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, call_finished, screencast_proxy);
+    /*
     GVariant *args = nullptr;
     if (object_path == nullptr) {
-        args = g_variant_new("(a{sv})", &builder);
+        args = g_variant_new("(a{sv})", &options_builder);
     } else if (strcmp(method_name, "Start") == 0) { // FIXME: horrible hack
         assert(g_variant_is_object_path(object_path));
-        args = g_variant_new("(osa{sv})", object_path, "", &builder);
+        args = g_variant_new("(osa{sv})", object_path, "", &options_builder);
     } else {
         assert(g_variant_is_object_path(object_path));
-        args = g_variant_new("(oa{sv})", object_path, &builder);
-    }
-    g_variant_builder_clear(&builder);
-    g_dbus_proxy_call(screencast_proxy, method_name, args, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, call_finished, screencast_proxy);
-}
+        args = g_variant_new("(oa{sv})", object_path, &options_builder);
+    }*/
+        
+    }   
+};
 
 struct screen_cast_session {
     GMainLoop *dbus_loop = nullptr;
@@ -205,12 +193,9 @@ struct screen_cast_session {
     char padding2[1000];
 
     // used exclusively by pipewire thread
-    struct video_frame *dequed_blank_frame = nullptr;
-    char padding3[1000];
-
     moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> blank_frames {BLANK_FRAMES_QUEUE_SIZE};
     moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
-    
+
     // empty string if no error occured, or an error message
     std::promise<std::string> init_error;
 
@@ -226,7 +211,6 @@ struct screen_cast_session {
         assert(tile != nullptr);
         tile->width = size.width; //TODO
         tile->height = size.height; //TODO
-
         tile->data_len = vc_get_linesize(tile->width, frame->color_spec) * tile->height;
         tile->data = (char *) malloc(tile->data_len);
         return frame;
@@ -304,7 +288,7 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
     params[0] = static_cast<spa_pod *>(spa_pod_builder_add_object(&builder,
         SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
         SPA_PARAM_BUFFERS_buffers,
-        SPA_POD_CHOICE_RANGE_Int(8, 2, MAX_BUFFERS),
+        SPA_POD_CHOICE_RANGE_Int(20, 10, 50), //FIXME
         SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
         SPA_PARAM_BUFFERS_size, SPA_POD_Int(size * mult),
         SPA_PARAM_BUFFERS_stride,
@@ -364,23 +348,25 @@ static void copy_bgra_to_rgba(char *dest, char *src, int width, int height) {
 
 static void on_process(void *session_ptr) {
     screen_cast_session &session = *static_cast<screen_cast_session*>(session_ptr);
-    //LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: on process\n"
     static int frame_count = 0;
     static uint64_t begin_time = time_since_epoch_in_ms();
 
-
+    std::vector<pw_buffer*> recycle_buffers;
     pw_buffer *buffer;
     int n_buffers_from_pw = 0;
     while((buffer = pw_stream_dequeue_buffer(session.stream)) != nullptr){    
         ++n_buffers_from_pw;
 
-        
-        if(session.dequed_blank_frame == nullptr && !session.blank_frames.try_dequeue(session.dequed_blank_frame))
+        /*if( == nullptr && !session.blank_frames.try_dequeue(session.dequed_blank_frame))
         {
-            //LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: dropping - no blank frame\n";
+            LOG(LOG_LEVEL_INFO) << "[screen_pw]: dropping - no blank frame\n";
             pw_stream_queue_buffer(session.stream, buffer);
             continue;
-        }
+        }*/
+        video_frame *next_frame;
+        session.blank_frames.wait_dequeue(next_frame);
+
+        //session.blank_frames.wait_dequeue(session.dequed_blank_frame);
             
 
         if(buffer == nullptr){
@@ -392,45 +378,56 @@ static void on_process(void *session_ptr) {
         assert(buffer->buffer->datas != nullptr);
         assert(buffer->buffer->datas[0].data != nullptr);
         //memcpy(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.height * vc_get_linesize(session.size.width, RGBA));
-        copy_bgra_to_rgba(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.width, session.size.height);
+        copy_bgra_to_rgba(next_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.width, session.size.height);
         
-        session.sending_frames.wait_enqueue(session.dequed_blank_frame);
+        /*
+        struct spa_meta_cursor *cursor_metadata = static_cast<spa_meta_cursor *>(spa_buffer_find_meta_data(buffer->buffer, SPA_META_Cursor, sizeof(spa_meta_cursor)));
+        //std::cout<<"cursor meta" << cursor_metadata << std::endl;
         
-        session.dequed_blank_frame = nullptr;
-        pw_stream_queue_buffer(session.stream, buffer);
+        if(cursor_metadata != nullptr && spa_meta_cursor_is_valid(cursor_metadata)){
+            std::cout << "cursor: "<< cursor_metadata->position.x << " " << cursor_metadata->position.y << "";
+        }*/
+
+        session.sending_frames.wait_enqueue(next_frame);
+        
+        recycle_buffers.push_back(buffer);
+        //pw_stream_queue_buffer(session.stream, buffer);
         
         ++frame_count;
         uint64_t time_now = time_since_epoch_in_ms();
 
         uint64_t delta = time_now - begin_time;
         if(delta >= 5000) {
-            LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: on process: average fps in last 5 seconds: " <<  frame_count / (delta / 1000.0) << "\n";
+            LOG(LOG_LEVEL_INFO) << "[screen_pw]: on process: average fps in last 5 seconds: " <<  frame_count / (delta / 1000.0) << "\n";
             frame_count = 0;
             begin_time = time_since_epoch_in_ms();
         }
     }
+    
+    for(pw_buffer *buffer : recycle_buffers)
+        pw_stream_queue_buffer(session.stream, buffer);
 
     static uint8_t counter = 0;
     if( (++counter)%40 == 0)
-        LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: from pw: "<< n_buffers_from_pw << "\t sending: "<<session.sending_frames.size_approx() << "\t blank: " << session.blank_frames.size_approx() << "\n";
+        LOG(LOG_LEVEL_INFO) << "[screen_pw]: from pw: "<< n_buffers_from_pw << "\t sending: "<<session.sending_frames.size_approx() << "\t blank: " << session.blank_frames.size_approx() << "\n";
 }
 
 static void on_drained(void*)
 {
-    LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: drained\n";
+    LOG(LOG_LEVEL_VERBOSE) << "[screen_pw]: pipewire: drained\n";
 }
 
 static void on_add_buffer(void *session_ptr, struct pw_buffer *)
 {
     (void) session_ptr;
 
-    LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: add_buffer\n";
+    LOG(LOG_LEVEL_VERBOSE) << "[screen_pw]: pipewire: add_buffer\n";
 }
 
 static void on_remove_buffer(void *session_ptr, struct pw_buffer *)
 {
     (void) session_ptr;
-    LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: remove_buffer\n";
+    LOG(LOG_LEVEL_VERBOSE) << "[screen_pw]: pipewire: remove_buffer\n";
 }
 
 static const struct pw_stream_events stream_events = {
@@ -522,10 +519,7 @@ static int start_pipewire(screen_cast_session &session)
             SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
             SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
             SPA_FORMAT_VIDEO_format,
-            SPA_POD_CHOICE_ENUM_Id(
-                    2, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRx /*SPA_VIDEO_FORMAT_RGB15, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_YUY2,
-                    SPA_VIDEO_FORMAT_YUV9 , SPA_VIDEO_FORMAT_RGB SPA_VIDEO_FORMAT_RGBA_F32, SPA_VIDEO_FORMAT_RGBA_F32, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
-                    SPA_VIDEO_FORMAT_RGBx*/),
+            SPA_POD_CHOICE_ENUM_Id(2, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRx), //TODO: RGBA RGBx
             SPA_FORMAT_VIDEO_size,
             SPA_POD_CHOICE_RANGE_Rectangle(
                     &size_rect_def,
@@ -556,11 +550,10 @@ static int start_pipewire(screen_cast_session &session)
 
 static void run_screencast(screen_cast_session *session_ptr) {
     auto& session = *session_ptr;
-
+    
     session.pipewire_fd = -1;
     session.pipewire_node = UINT32_MAX;
     session.dbus_loop = g_main_loop_new(nullptr, false);
-
     GError *error = nullptr;
 
     GDBusConnection *connection = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
@@ -579,6 +572,9 @@ static void run_screencast(screen_cast_session *session_ptr) {
 
     session_path_t session_path = session_path_t::create(sender_name);
     LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: session path: '" << session_path.path << "'" << "token: '" << session_path.token << "'\n";
+
+
+    Portal portal(connection, screencast_proxy);
 
     auto pipewire_opened = [](GObject *source, GAsyncResult *res, void *user_data) {
         auto session = static_cast<screen_cast_session*>(user_data);
@@ -642,7 +638,13 @@ static void run_screencast(screen_cast_session *session_ptr) {
         g_variant_get(parameters, "(u@a{sv})", &result, &response);
         assert(result == 0 && "Failed to select sources");
         g_variant_unref(response);
-        portal_call(connection, screencast_proxy, session_path.path.c_str(), "Start", {}, started);
+        //portal_call(connection, screencast_proxy, session_path.path.c_str(), "Start", {}, started);
+
+        {
+            GVariantBuilder params;
+            g_variant_builder_init(&params, G_VARIANT_TYPE_VARDICT);
+            portal.call("Start", {g_variant_new_object_path(session_path.path.c_str()),  /*parent window: */ g_variant_new_string("")}, params, started);
+        }
     };
 
     auto session_created = [&](GVariant *parameters) {
@@ -658,21 +660,26 @@ static void run_screencast(screen_cast_session *session_ptr) {
         LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: session created with handle: " << session_handle << "\n";
         assert(session_path.path == session_handle);
 
-        portal_call(connection, screencast_proxy, session_handle, "SelectSources",
-                    {
-                            {"types",    g_variant_new_uint32(3)}, // 1 full screen, 2 - a window, 3 - both
-                            {"multiple", g_variant_new_boolean(false)}
-                    },
-                    sources_selected
-        );
+        
+        {
+            GVariantBuilder params;
+            g_variant_builder_init(&params, G_VARIANT_TYPE_VARDICT);
+            g_variant_builder_add(&params, "{sv}", "types", g_variant_new_uint32(3)); // 1 full screen, 2 - a window, 3 - both
+            g_variant_builder_add(&params, "{sv}", "multiple", g_variant_new_boolean(false));
+            //g_variant_builder_add(&params, "{sv}", "cursor_mode", g_variant_new_uint32(2));
+            // {"cursor_mode", g_variant_new_uint32(4)}
+            portal.call("SelectSources", {g_variant_new_object_path(session_path.path.c_str())}, params, sources_selected);
+        }
     };
 
-    portal_call(connection, screencast_proxy, nullptr, "CreateSession",
-                {
-                        {"session_handle_token", g_variant_new_string(session_path.token.c_str())}
-                },
-                session_created
-    );
+
+    {
+        GVariantBuilder params;
+        g_variant_builder_init(&params, G_VARIANT_TYPE_VARDICT);
+        g_variant_builder_add(&params, "{sv}", "session_handle_token", g_variant_new_string(session_path.token.c_str()));
+        
+        portal.call("CreateSession", {}, params, session_created);
+    }
 
     g_dbus_connection_flush(connection, nullptr, nullptr, nullptr);
     LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: running dbus loop\n";
@@ -731,19 +738,15 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct
     assert(session_ptr != nullptr);
     auto &session = *static_cast<screen_cast_session*>(session_ptr);
     *audio = nullptr;
-    //auto stopwatch = Stopwatch::create("_grab", 0);
    
     if(session.in_flight_frame != nullptr){
-        //auto stopwatch = Stopwatch::create("enqueue blank", 0);
         session.blank_frames.wait_enqueue(session.in_flight_frame);
     }
     
     session.in_flight_frame = nullptr;
 
-    {
-        //auto stopwatch = Stopwatch::create("dequeue sending", 0);
-        session.sending_frames.wait_dequeue(session.in_flight_frame);
-    }
+    session.sending_frames.wait_dequeue(session.in_flight_frame);
+    
     return session.in_flight_frame;
 }
 
