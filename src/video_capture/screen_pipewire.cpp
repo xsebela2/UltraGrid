@@ -24,15 +24,11 @@
 #include "lib_common.h"
 #include "video.h"
 #include "video_capture.h"
-#include "concurrent_queue/readerwritercircularbuffer.h"
 #include "concurrent_queue/readerwriterqueue.h"
 
 
 #define MAX_BUFFERS 30
-static constexpr int SENDING_FRAMES_QUEUE_SIZE = 50;
-static constexpr int BLANK_FRAMES_QUEUE_SIZE = 50;
-static constexpr int BLANK_FRAMES_COUNT = 50;
-static_assert(BLANK_FRAMES_COUNT <= BLANK_FRAMES_QUEUE_SIZE);
+static constexpr int QUEUE_SIZE = 30;
 
 
 struct request_path_t {
@@ -194,6 +190,44 @@ public:
     } 
 };
 
+//using unique_ptr_video_frame = std::unique_ptr<video_frame, decltype(&vf_free)>;
+
+class video_frame_wrapper
+{
+private:
+    video_frame* frame;
+public:
+    explicit video_frame_wrapper(video_frame* frame = nullptr)
+        :frame(frame)
+    {}
+
+    video_frame_wrapper(video_frame_wrapper&) = delete;
+    video_frame_wrapper& operator= (video_frame_wrapper&) = delete;
+    
+    video_frame_wrapper(video_frame_wrapper&& other) 
+        : frame(std::exchange(other.frame, nullptr))
+    {}
+
+    video_frame_wrapper& operator=(video_frame_wrapper&& other) {
+        vf_free(frame);
+        frame = std::exchange(other.frame, nullptr);
+        return *this;
+    }
+
+    ~video_frame_wrapper(){
+        vf_free(frame);
+    }
+
+    video_frame* get() {
+        return frame;
+    }
+
+    video_frame* operator->(){
+        return get();
+    }
+};
+
+
 struct screen_cast_session { 
 
     struct {
@@ -220,16 +254,16 @@ struct screen_cast_session {
     struct spa_rectangle size = {};
 
     // used exlusively by ultragrid thread
-    struct video_frame *in_flight_frame = nullptr;
+    video_frame_wrapper in_flight_frame;
 
     // used exclusively by pipewire thread
-    moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> blank_frames {BLANK_FRAMES_QUEUE_SIZE};
-    moodycamel::BlockingReaderWriterCircularBuffer<video_frame*> sending_frames {SENDING_FRAMES_QUEUE_SIZE};
+    moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> blank_frames {QUEUE_SIZE};
+    moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> sending_frames {QUEUE_SIZE};
 
     // empty string if no error occured, or an error message
     std::promise<std::string> init_error;
 
-    struct video_frame *new_blank_frame()
+    video_frame_wrapper new_blank_frame()
     {
         struct video_frame *frame = vf_alloc(1);
         frame->color_spec = RGBA;
@@ -243,7 +277,7 @@ struct screen_cast_session {
         tile->height = size.height; //TODO
         tile->data_len = vc_get_linesize(tile->width, frame->color_spec) * tile->height;
         tile->data = (char *) malloc(tile->data_len);
-        return frame;
+        return video_frame_wrapper(frame);
     }
 
     ~screen_cast_session() {
@@ -357,8 +391,8 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
 
     pw_stream_update_params(session.stream, params, 4);
 
-    for(int i = 0; i < BLANK_FRAMES_COUNT; ++i)
-        session.blank_frames.wait_enqueue(session.new_blank_frame());
+    for(int i = 0; i < QUEUE_SIZE; ++i)
+        session.blank_frames.enqueue(session.new_blank_frame());
     
     session.init_error.set_value("");
 }
@@ -393,7 +427,7 @@ static void on_process(void *session_ptr) {
             pw_stream_queue_buffer(session.stream, buffer);
             continue;
         }*/
-        video_frame *next_frame;
+        video_frame_wrapper next_frame;
         session.blank_frames.wait_dequeue(next_frame);
 
         //session.blank_frames.wait_dequeue(session.dequed_blank_frame);
@@ -418,7 +452,7 @@ static void on_process(void *session_ptr) {
             std::cout << "cursor: "<< cursor_metadata->position.x << " " << cursor_metadata->position.y << "";
         }*/
 
-        session.sending_frames.wait_enqueue(next_frame);
+        session.sending_frames.enqueue(std::move(next_frame));
         
         recycle_buffers.push_back(buffer);
         //pw_stream_queue_buffer(session.stream, buffer);
@@ -803,15 +837,13 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct
     auto &session = *static_cast<screen_cast_session*>(session_ptr);
     *audio = nullptr;
    
-    if(session.in_flight_frame != nullptr){
-        session.blank_frames.wait_enqueue(session.in_flight_frame);
+    if(session.in_flight_frame.get() != nullptr){
+        session.blank_frames.enqueue(std::move(session.in_flight_frame));
     }
-    
-    session.in_flight_frame = nullptr;
 
     session.sending_frames.wait_dequeue(session.in_flight_frame);
     
-    return session.in_flight_frame;
+    return session.in_flight_frame.get();
 }
 
 static const struct video_capture_info vidcap_screen_pipewire_info = {
