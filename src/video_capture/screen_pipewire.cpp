@@ -27,8 +27,8 @@
 #include "concurrent_queue/readerwriterqueue.h"
 
 
-#define MAX_BUFFERS 30
-static constexpr int QUEUE_SIZE = 30;
+#define MAX_BUFFERS 5
+static constexpr int QUEUE_SIZE = 10;
 
 
 struct request_path_t {
@@ -361,15 +361,15 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
         SPA_PARAM_BUFFERS_dataType,
         SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemPtr)))
     );
-
-    /* a header metadata with timing information */
+    /*
+    // a header metadata with timing information
     params[1] = static_cast<spa_pod *>(spa_pod_builder_add_object(&builder,
         SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
         SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
         SPA_PARAM_META_size,
         SPA_POD_Int(sizeof(struct spa_meta_header)))
     );
-    /* video cropping information */
+    // video cropping information
     params[2] = static_cast<spa_pod *>(spa_pod_builder_add_object(&builder,
         SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
         SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
@@ -378,7 +378,7 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
     );
     
     #define CURSOR_META_SIZE(w, h)   (sizeof(struct spa_meta_cursor) + sizeof(struct spa_meta_bitmap) + (w) * (h) * 4)
-    /* cursor information */
+    // cursor
     params[3] = static_cast<spa_pod *>(spa_pod_builder_add_object(&builder,
         SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
         SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
@@ -387,9 +387,9 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
             CURSOR_META_SIZE(1, 1),
             CURSOR_META_SIZE(256, 256))
         )
-    );
+    );*/
 
-    pw_stream_update_params(session.stream, params, 4);
+    pw_stream_update_params(session.stream, params, 1);
 
     for(int i = 0; i < QUEUE_SIZE; ++i)
         session.blank_frames.enqueue(session.new_blank_frame());
@@ -415,7 +415,6 @@ static void on_process(void *session_ptr) {
     static int frame_count = 0;
     static uint64_t begin_time = time_since_epoch_in_ms();
 
-    std::vector<pw_buffer*> recycle_buffers;
     pw_buffer *buffer;
     int n_buffers_from_pw = 0;
     while((buffer = pw_stream_dequeue_buffer(session.stream)) != nullptr){    
@@ -427,21 +426,29 @@ static void on_process(void *session_ptr) {
             pw_stream_queue_buffer(session.stream, buffer);
             continue;
         }*/
-        video_frame_wrapper next_frame;
-        session.blank_frames.wait_dequeue(next_frame);
-
+       
         //session.blank_frames.wait_dequeue(session.dequed_blank_frame);
-            
+        video_frame_wrapper next_frame;
 
-        if(buffer == nullptr){
-            LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: pipewire is out of buffers\n";
-            return;
-        }
-
+        
         assert(buffer->buffer != nullptr);
         assert(buffer->buffer->datas != nullptr);
         assert(buffer->buffer->datas[0].data != nullptr);
-        //memcpy(session.dequed_blank_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.height * vc_get_linesize(session.size.width, RGBA));
+
+        if(buffer->buffer->datas[0].chunk == nullptr || buffer->buffer->datas[0].chunk->size == 0) {
+            LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: dropping - empty pw frame " << "\n";
+            pw_stream_queue_buffer(session.stream, buffer);
+            continue;
+        }
+
+        if(!session.blank_frames.try_dequeue(next_frame)) {
+            LOG(LOG_LEVEL_INFO) << "[screen_pw]: dropping - no blank frame\n";
+            pw_stream_queue_buffer(session.stream, buffer);
+            continue;
+        }
+
+
+        //memcpy(next_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.height * vc_get_linesize(session.size.width, RGBA));
         copy_bgra_to_rgba(next_frame->tiles[0].data, static_cast<char*>(buffer->buffer->datas[0].data), session.size.width, session.size.height);
         
         /*
@@ -454,8 +461,7 @@ static void on_process(void *session_ptr) {
 
         session.sending_frames.enqueue(std::move(next_frame));
         
-        recycle_buffers.push_back(buffer);
-        //pw_stream_queue_buffer(session.stream, buffer);
+        pw_stream_queue_buffer(session.stream, buffer);
         
         ++frame_count;
         uint64_t time_now = time_since_epoch_in_ms();
@@ -468,9 +474,6 @@ static void on_process(void *session_ptr) {
         }
     }
     
-    for(pw_buffer *buffer : recycle_buffers)
-        pw_stream_queue_buffer(session.stream, buffer);
-
     static uint8_t counter = 0;
     if( (++counter)%40 == 0)
         LOG(LOG_LEVEL_INFO) << "[screen_pw]: from pw: "<< n_buffers_from_pw << "\t sending: "<<session.sending_frames.size_approx() << "\t blank: " << session.blank_frames.size_approx() << "\n";
