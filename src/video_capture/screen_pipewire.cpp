@@ -188,7 +188,8 @@ public:
     }
 
     ~ScreenCastPortal() {
-        //g_main_loop_unref(session.dbus_loop); //FIXME
+        g_main_loop_quit(dbus_loop);
+        //g_main_loop_unref(session.dbus_loop);
         g_object_unref(screencast_proxy);
         g_object_unref(connection);
     } 
@@ -299,10 +300,10 @@ struct screen_cast_session {
 static void on_stream_state_changed(void *session_ptr, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
     (void) session_ptr;
     LOG(LOG_LEVEL_INFO) << "[screen_pw] stream state changed \"" << pw_stream_state_as_string(old) 
-                        << "\" -> \""<<pw_stream_state_as_string(state)<<"\"\n"
+                        << "\" -> \""<<pw_stream_state_as_string(state)<<"\"\n";
     
     if(error != nullptr) {
-        LOG(LOG_LEVEL_ERROR) << "[screen_pw] stream error: '"<< error << "'\n"
+        LOG(LOG_LEVEL_ERROR) << "[screen_pw] stream error: '"<< error << "'\n";
     }
     
     switch (state) {
@@ -633,6 +634,12 @@ static int start_pipewire(screen_cast_session &session)
 static void on_portal_session_closed(GDBusConnection *connection, const gchar *sender_name, const gchar *object_path,
                                     const gchar *interface_name, const gchar *signal_name, GVariant *parameters, gpointer user_data)
 {
+    (void) connection;
+    (void) sender_name;
+    (void) object_path;
+    (void) interface_name;
+    (void) signal_name;
+    (void) parameters;
     auto &session = *static_cast<screen_cast_session*>(user_data);
     //TODO: check if this is fired by newer Gnome 
     LOG(LOG_LEVEL_INFO) << "[screen_pw] session closed by compositor\n";
@@ -648,18 +655,6 @@ static void run_screencast(screen_cast_session *session_ptr) {
     
     session_path_t session_path = session_path_t::create(session.portal->sender_name());
     LOG(LOG_LEVEL_VERBOSE) << "[screen_pw]: session path: '" << session_path.path << "'" << " token: '" << session_path.token << "'\n";
-
-/*
- g_dbus_connection_signal_subscribe(connection, "org.freedesktop.portal.Desktop",
-                                        "org.freedesktop.portal.Request",
-                                        "Response",
-                                        request_path.path.c_str(),
-                                        nullptr,
-                                        G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
-                                        callback,
-                                        new PortalCallCallback{std::move(on_response)},
-                                        [](gpointer user_data) { delete static_cast< PortalCallCallback * >(user_data); });
-*/
 
     g_dbus_connection_signal_subscribe(session.portal->dbus_connection(), 
                                        nullptr, // sender
