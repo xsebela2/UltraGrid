@@ -27,6 +27,34 @@
 #include "concurrent_queue/readerwriterqueue.h"
 
 
+//#define ENABLE_INSTRUMENTATION
+
+#ifdef ENABLE_INSTRUMENTATION
+    
+    class instrumtation_ScopeStopwatch
+    {
+        const char *name;
+        std::chrono::time_point<std::chrono::high_resolution_clock> begin_time;
+
+    public:    
+        instrumtation_ScopeStopwatch (const char *name)
+            :name(name)
+        {
+            begin_time = std::chrono::high_resolution_clock::now();
+        }
+
+        ~instrumtation_ScopeStopwatch(){
+            auto now = std::chrono::high_resolution_clock::now();
+            auto delta = std::chrono::duration_cast<std::chrono::microseconds>(now-begin_time).count();
+            LOG(LOG_LEVEL_NOTICE) << "[stopwatch \"" << name << "\"] took " << delta << " us\n";
+        }
+    };
+    #define SCOPE_STOPWATCH(name) instrumtation_ScopeStopwatch scope_stopwatch_##name(#name)
+
+#else
+    #define SCOPE_STOPWATCH(name)
+#endif
+
 #define MAX_BUFFERS 2
 static constexpr int QUEUE_SIZE = 3;
 
@@ -289,11 +317,6 @@ struct screen_cast_session {
         return video_frame_wrapper(frame);
     }
 
-    std::chrono::duration<int64_t, std::milli> expected_frame_time_ms(){
-        using namespace std::chrono_literals;
-        return 1000ms / format.info.raw.framerate.num * format.info.raw.framerate.denom;
-    }
-
     ~screen_cast_session() {
         LOG(LOG_LEVEL_INFO) << "[screen_pw]: screen_cast_session begin desructor\n";
         //pw_thread_loop_unlock();
@@ -420,6 +443,8 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
 }
 
 static void copy_bgra_to_rgba(char *dest, char *src, int width, int height) {
+    SCOPE_STOPWATCH(copy_bgra_to_rgba);
+
     int linesize = 4*width;
     for (int line_offset = 0; line_offset < height * linesize; line_offset += linesize) {
         for(int x = 0; x < 4*width; x += 4) {
@@ -433,8 +458,9 @@ static void copy_bgra_to_rgba(char *dest, char *src, int width, int height) {
 }
 
 static void on_process(void *session_ptr) {
-    screen_cast_session &session = *static_cast<screen_cast_session*>(session_ptr);
+    SCOPE_STOPWATCH(on_process);
 
+    screen_cast_session &session = *static_cast<screen_cast_session*>(session_ptr);
     pw_buffer *buffer;
     int n_buffers_from_pw = 0;
     while((buffer = pw_stream_dequeue_buffer(session.stream)) != nullptr){    
@@ -462,7 +488,8 @@ static void on_process(void *session_ptr) {
         }
 
         using namespace std::chrono_literals;
-        if(!session.blank_frames.wait_dequeue_timed(next_frame, 1000ms / session.pw_approx_average_fps * 3 / 4)) {
+        if(!session.blank_frames.wait_dequeue_timed(next_frame, 1000ms / session.pw_approx_average_fps)) {
+            assert(false);
             LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: dropping frame (blank frame dequeue timed out)\n";
             pw_stream_queue_buffer(session.stream, buffer);
             continue;
@@ -849,7 +876,7 @@ static int vidcap_screen_pipewire_init(struct vidcap_params *params, void **stat
                 //free(s);
                 //TODO
                 return VIDCAP_INIT_NOERR;
-        } else if (params_string == "showcursor") {d
+        } else if (params_string == "showcursor") {
             session->user_options.show_cursor = true;
         } else if (params_string == "persistent") {
             session->user_options.persistence_filename = "screen-pw.token";
@@ -883,6 +910,8 @@ static void vidcap_screen_pipewire_done(void *session_ptr)
 
 static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct audio_frame **audio)
 {    
+    SCOPE_STOPWATCH(grab);
+
     assert(session_ptr != nullptr);
     auto &session = *static_cast<screen_cast_session*>(session_ptr);
     *audio = nullptr;
@@ -893,7 +922,6 @@ static struct video_frame *vidcap_screen_pipewire_grab(void *session_ptr, struct
     
     using namespace std::chrono_literals;
     session.sending_frames.wait_dequeue_timed(session.in_flight_frame, 500ms);
-    //session.sending_frames.try_deque(session.in_flight_frame);
     return session.in_flight_frame.get();
 }
 
