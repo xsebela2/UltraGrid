@@ -167,8 +167,7 @@ public:
             uint32_t response;
             GVariant *results;
             g_variant_get(parameters, "(u@a{sv})", &response, &results);
-            //ScopeExit scope_exit([&](){ g_variant_unref(results); });
-            
+
             static_cast<const PortalCallCallback *> (user_data)->operator()(response, results);
             g_dbus_connection_call(connection, "org.freedesktop.portal.Desktop",
                     object_path, "org.freedesktop.portal.Request", "Close",
@@ -307,9 +306,7 @@ struct screen_cast_session {
         struct spa_io_position *position = nullptr;
 
         struct spa_video_info format = {};
-        //int32_t output_line_size = 0;
-        int frame_count = 0;
-        
+
         int width() {
             return format.info.raw.size.width;
         }
@@ -317,8 +314,30 @@ struct screen_cast_session {
         int height() {
             return format.info.raw.size.height;
         }
-       
+
+        spa_video_format video_format() {
+            return format.info.raw.format;
+        }
+
+        video_frame_wrapper allocate_video_frame()
+        {
+            struct video_frame *frame = vf_alloc(1);
+            frame->color_spec = RGBA;
+            frame->interlacing = PROGRESSIVE;
+            frame->fps = 60;
+            frame->callbacks.data_deleter = vf_data_deleter;
+            
+            struct tile* tile = vf_get_tile(frame, 0);
+            assert(tile != nullptr);
+            tile->width = width(); //TODO
+            tile->height = height(); //TODO
+            tile->data_len = vc_get_linesize(tile->width, frame->color_spec) * tile->height;
+            tile->data = (char *) malloc(tile->data_len);
+            return video_frame_wrapper(frame);
+        }
+
         //std::chrono::duration<uint64_t, std::milli> pw_begin_time =std::chrono::system_clock::now();
+        int frame_count = 0;
         uint64_t frame_counter_begin_time = time_since_epoch_in_ms();
         uint64_t expecting_fps = DEFAULT_EXCPETING_FPS;
     }pw;
@@ -326,29 +345,11 @@ struct screen_cast_session {
     // used exlusively by ultragrid thread
     video_frame_wrapper in_flight_frame;
 
-    // used exclusively by pipewire thread
     moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> blank_frames {QUEUE_SIZE};
     moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> sending_frames {QUEUE_SIZE};
 
     // empty string if no error occured, or an error message
     std::promise<std::string> init_error;
-
-    video_frame_wrapper new_blank_frame()
-    {
-        struct video_frame *frame = vf_alloc(1);
-        frame->color_spec = RGBA;
-        frame->interlacing = PROGRESSIVE;
-        frame->fps = 60;
-        frame->callbacks.data_deleter = vf_data_deleter;
-        
-        struct tile* tile = vf_get_tile(frame, 0);
-        assert(tile != nullptr);
-        tile->width = pw.width(); //TODO
-        tile->height = pw.height(); //TODO
-        tile->data_len = vc_get_linesize(tile->width, frame->color_spec) * tile->height;
-        tile->data = (char *) malloc(tile->data_len);
-        return video_frame_wrapper(frame);
-    }
 
     ~screen_cast_session() {
         LOG(LOG_LEVEL_INFO) << "[screen_pw]: screen_cast_session begin desructor\n";
@@ -369,20 +370,6 @@ static void on_stream_state_changed(void *session_ptr, enum pw_stream_state old,
     
     if(error != nullptr) {
         LOG(LOG_LEVEL_ERROR) << "[screen_pw] stream error: '"<< error << "'\n";
-    }
-    
-    switch (state) {
-        case PW_STREAM_STATE_UNCONNECTED:
-            LOG(LOG_LEVEL_INFO) << "[screen_pw] stream disconected\n"; 
-            //assert(false && "disconected");
-            //pw_thread_loop_stop(session);
-            break;
-        case PW_STREAM_STATE_PAUSED:
-            //pw_main_loop_quit(data->loop);
-            //pw_stream_set_active(data->stream, true);
-            break;
-        default:
-            break;
     }
 }
 
@@ -459,7 +446,7 @@ static void on_stream_param_changed(void *session_ptr, uint32_t id, const struct
     pw_stream_update_params(session.pw.stream, params, 1);
 
     for(int i = 0; i < QUEUE_SIZE; ++i)
-        session.blank_frames.enqueue(session.new_blank_frame());
+        session.blank_frames.enqueue(session.pw.allocate_video_frame());
     
     session.init_error.set_value("");
 }
