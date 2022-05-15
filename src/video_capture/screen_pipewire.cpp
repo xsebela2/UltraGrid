@@ -19,6 +19,7 @@
 #include <chrono>
 #include <fstream>
 #include <algorithm>
+#include <rang.hpp>
 
 #include "utils/synchronized_queue.h"
 #include "debug.h"
@@ -222,7 +223,6 @@ public:
         g_main_loop_quit(dbus_loop);
     }
 
-    //TODO: remove
     GDBusProxy *proxy() {
         return screencast_proxy;
     }
@@ -283,16 +283,28 @@ public:
 
 
 struct screen_cast_session { 
+    // used exlusively by ultragrid thread
+    video_frame_wrapper in_flight_frame;
+
+    moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> blank_frames {QUEUE_SIZE};
+    moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> sending_frames {QUEUE_SIZE};
 
     struct {
         bool show_cursor = false;
-        std::string persistence_filename = "";
-        int target_fps = -1;
+        std::string restore_file = "";
+        uint32_t fps = 0;
     } user_options;
 
     std::unique_ptr<ScreenCastPortal> portal;
 
-    struct {
+    // empty string if no error occured, or an error message
+    std::promise<std::string> init_error;
+
+    struct pw_{
+        pw_() {
+            pw_init(&uv_argc, &uv_argv);
+        }
+        
         int fd = -1;
         uint32_t node = -1;
         
@@ -324,7 +336,7 @@ struct screen_cast_session {
             struct video_frame *frame = vf_alloc(1);
             frame->color_spec = RGBA;
             frame->interlacing = PROGRESSIVE;
-            frame->fps = 60;
+            frame->fps = expecting_fps;
             frame->callbacks.data_deleter = vf_data_deleter;
             
             struct tile* tile = vf_get_tile(frame, 0);
@@ -340,27 +352,15 @@ struct screen_cast_session {
         int frame_count = 0;
         uint64_t frame_counter_begin_time = time_since_epoch_in_ms();
         uint64_t expecting_fps = DEFAULT_EXCPETING_FPS;
+
+        ~pw_() {
+            if(loop != nullptr)
+                pw_thread_loop_stop(loop);
+            if(stream != nullptr)
+                pw_stream_destroy(stream);
+            pw_deinit();
+        }
     }pw;
-
-    // used exlusively by ultragrid thread
-    video_frame_wrapper in_flight_frame;
-
-    moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> blank_frames {QUEUE_SIZE};
-    moodycamel::BlockingReaderWriterQueue<video_frame_wrapper> sending_frames {QUEUE_SIZE};
-
-    // empty string if no error occured, or an error message
-    std::promise<std::string> init_error;
-
-    ~screen_cast_session() {
-        LOG(LOG_LEVEL_INFO) << "[screen_pw]: screen_cast_session begin desructor\n";
-        //pw_thread_loop_unlock();
-        pw_thread_loop_stop(pw.loop);
-        //pw_stream_disconnect(stream);
-        pw_stream_destroy(pw.stream);
-        //pw_thread_loop_destroy(loop);
-        //pw_core_disconnect(core);
-        LOG(LOG_LEVEL_INFO) << "[screen_pw]: screen_cast_session destroyed\n";
-    }
 };
 
 static void on_stream_state_changed(void *session_ptr, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
@@ -368,7 +368,7 @@ static void on_stream_state_changed(void *session_ptr, enum pw_stream_state old,
     LOG(LOG_LEVEL_INFO) << "[screen_pw] stream state changed \"" << pw_stream_state_as_string(old) 
                         << "\" -> \""<<pw_stream_state_as_string(state)<<"\"\n";
     
-    if(error != nullptr) {
+    if (error != nullptr) {
         LOG(LOG_LEVEL_ERROR) << "[screen_pw] stream error: '"<< error << "'\n";
     }
 }
@@ -583,7 +583,7 @@ static const struct pw_core_events core_events = {
 const struct spa_pod *params[2];
 
 static int start_pipewire(screen_cast_session &session)
-{
+{    
     uint8_t params_buffer[1024];
     struct spa_pod_builder pod_builder = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
 
@@ -618,10 +618,9 @@ static int start_pipewire(screen_cast_session &session)
     auto size_rect_max = SPA_RECTANGLE(3840,
                                        2160);
 
-    auto framerate_def = SPA_FRACTION(DEFAULT_EXCPETING_FPS, 1);
+    auto framerate_def = SPA_FRACTION(session.user_options.fps > 0 ? session.user_options.fps : DEFAULT_EXCPETING_FPS, 1);
     auto framerate_min = SPA_FRACTION(0, 1);
-    auto framerate_max = SPA_FRACTION(300 , 1);
-
+    auto framerate_max = SPA_FRACTION(600, 1);
 
     const int n_params = 1;
     params[0] = static_cast<spa_pod *> (spa_pod_builder_add_object(
@@ -730,10 +729,10 @@ static void run_screencast(screen_cast_session *session_ptr) {
 
         const char *restore_token = nullptr;
         if (g_variant_lookup(results, "restore_token", "s", &restore_token)){
-            if(session.user_options.persistence_filename.empty()){
+            if(session.user_options.restore_file.empty()){
                 LOG(LOG_LEVEL_WARNING) << "[screen_pw]: got unexpected restore_token from ScreenCast portal, ignoring it\n";
             }else{
-                std::ofstream file(session.user_options.persistence_filename);
+                std::ofstream file(session.user_options.restore_file);
                 file<<restore_token;
             }
         }
@@ -793,10 +792,10 @@ static void run_screencast(screen_cast_session *session_ptr) {
             if(session.user_options.show_cursor)
                 g_variant_builder_add(&params, "{sv}", "cursor_mode", g_variant_new_uint32(2));
             
-            if(!session.user_options.persistence_filename.empty()){
+            if(!session.user_options.restore_file.empty()){
                 //TODO: move to function
                 std::string token;
-                std::ifstream file(session.user_options.persistence_filename);
+                std::ifstream file(session.user_options.restore_file);
 
                 if(file.is_open()) {
                     std::ostringstream ss;
@@ -825,20 +824,75 @@ static void run_screencast(screen_cast_session *session_ptr) {
     }
     
     session.portal->run_loop();
-    //assert(false && "end loop");
-    //g_dbus_connection_flush(connection, nullptr, nullptr, nullptr); //TODO: needed?
 }
 
 static struct vidcap_type * vidcap_screen_pipewire_probe(bool verbose, void (**deleter)(void *))
 {
-    (void) verbose;
-    (void) deleter;
+    UNUSED(verbose);
     
-    LOG(LOG_LEVEL_INFO) << "[screen_pw]: [cap_pipewire] probe\n";
-    assert(false);
-    return nullptr;
+    struct vidcap_type* vt;
+    *deleter = free;
+
+    vt = (struct vidcap_type *) calloc(1, sizeof(struct vidcap_type));
+    if (vt == nullptr) {
+        return nullptr;
+    }
+
+    vt->name = "screen_pw";
+    vt->description = "Grabbing screen using PipeWire";
+    return vt;
 }
 
+static void show_help() {
+    auto param = [](const char* name) -> std::ostream& {
+        std::cout << rang::style::bold << "  " <<name << rang::style::reset << " - ";
+        return std::cout;
+    };
+
+    std::cout << "Screen capture using PipeWire and ScreenCast freedesktop portal API\n";
+    std::cout << "Usage: -t screen_pw[:cursor|:fps=<fps>|:restore=<token_file>]]\n";
+    param("cursor") << "make the cursor visible (default hidden)\n";
+    param("<fps>") << "prefered FPS passed to PipeWire (PipeWire may ignore it)\n";
+    param("<token_file>") << "restore the selected window/display from a file.\n\t\tIf not possible, display the selection dialog and save the token to the file specified.\n";
+}
+
+
+static int parse_params(struct vidcap_params *params, screen_cast_session &session) {
+    if(const char *fmt = vidcap_params_get_fmt(params)) {
+        std::cout<<"fmt: '" << fmt<<"'" << "\n";
+        
+        std::istringstream params_stream(fmt);
+        
+        std::string param;
+        while (std::getline(params_stream, param, ':')) {
+            if (param == "help") {
+                    show_help();
+                    return VIDCAP_INIT_NOERR;
+            } else if (param == "cursor") {
+                session.user_options.show_cursor = true;
+            } else {
+                auto split_index = param.find('=');
+                if(split_index != std::string::npos && split_index != 0){
+                    std::string name = param.substr(0, split_index);
+                    std::string value = param.substr(split_index + 1);
+
+                    if (name == "fps" || name == "FPS"){
+                        std::istringstream is(value);
+                        is >> session.user_options.fps;
+                        continue;
+                    }else if(name == "restore"){
+                        session.user_options.restore_file = value;
+                        continue;
+                    }
+                }
+
+                LOG(LOG_LEVEL_ERROR) << "[screen_pw] invalid option: \"" << param << "\"\n";
+                return VIDCAP_INIT_FAIL;
+            }
+        }
+    }
+    return VIDCAP_INIT_OK;
+}
 
 static int vidcap_screen_pipewire_init(struct vidcap_params *params, void **state)
 {
@@ -846,38 +900,23 @@ static int vidcap_screen_pipewire_init(struct vidcap_params *params, void **stat
         return VIDCAP_INIT_AUDIO_NOT_SUPPOTED;
     }
 
-    screen_cast_session *session = new screen_cast_session();
-    *state = session;
+    screen_cast_session &session = *new screen_cast_session();
+    *state = &session;
 
-    if(vidcap_params_get_fmt(params)) {
-        std::cout<<"fmt: '" << vidcap_params_get_fmt(params)<<"'" << "\n";
-        
-        std::string params_string = vidcap_params_get_fmt(params);
-        
-        if (params_string == "help") {
-                //TODO
-                //show_help();
-                //free(s);
-                //TODO
-                return VIDCAP_INIT_NOERR;
-        } else if (params_string == "showcursor") {
-            session->user_options.show_cursor = true;
-        } else if (params_string == "persistent") {
-            session->user_options.persistence_filename = "screen-pw.token";
-        }
-    }
-    
     LOG(LOG_LEVEL_DEBUG) << "[screen_pw]: [cap_pipewire] init\n";
-    pw_init(&uv_argc, &uv_argv);
+    
+    int params_ok = parse_params(params, session);
+    if(params_ok != VIDCAP_INIT_OK)
+        return params_ok;
 
-    std::future<std::string> future_error = session->init_error.get_future();
-    std::thread dbus_thread(run_screencast, session);
+    std::future<std::string> future_error = session.init_error.get_future();
+    std::thread dbus_thread(run_screencast, &session);
     future_error.wait();
     
     if (std::string error_msg = future_error.get(); !error_msg.empty()) {
         LOG(LOG_LEVEL_FATAL) << "[screen_pw]: " << error_msg << "\n";
         dbus_thread.join();
-        session->portal->quit_loop();
+        session.portal->quit_loop();
         return VIDCAP_INIT_FAIL;
     }
 
