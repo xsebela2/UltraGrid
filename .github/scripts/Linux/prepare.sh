@@ -25,8 +25,7 @@ sudo apt install libcurl4-nss-dev
 sudo apt install i965-va-driver-shaders # instead of i965-va-driver
 sudo apt install uuid-dev # Cineform
 
-sudo apt build-dep libsdl2
-sudo aptitude -y build-dep libsdl2-mixer libsdl2-ttf libsdl2-dev:
+sudo aptitude -y build-dep libsdl2 libsdl2-mixer libsdl2-ttf debhelper-compat: libsdl2-dev:
 
 # FFmpeg deps
 sudo add-apt-repository ppa:savoury1/vlc3 # new x265
