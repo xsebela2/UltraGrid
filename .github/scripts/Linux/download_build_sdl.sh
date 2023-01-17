@@ -3,10 +3,10 @@
 mkdir -p /var/tmp/sdl
 cd /var/tmp/sdl
 
-# v2.0.22 requires wayland-client version 1.18.0 but in U18.04 is only 1.16.0
-curl -sSLO https://github.com/libsdl-org/SDL/releases/download/release-2.0.20/SDL2-2.0.20.tar.gz
+SDL_VER=2.26.2
+curl -sSLO https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL2-${SDL_VER}.tar.gz
 tar xaf SDL2*tar*
-cd SDL2-2.0.20
+cd SDL2-${SDL_VER}
 ./configure
 make -j "$(nproc)"
 sudo make install # SDL needs to be installed here because it is a dependency for the below
