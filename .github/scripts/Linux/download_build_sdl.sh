@@ -6,7 +6,8 @@ cd /var/tmp/sdl
 SDL_VER=2.26.2
 curl -sSLO https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL2-${SDL_VER}.tar.gz
 tar xaf SDL2*tar*
-cd SDL2-${SDL_VER}
+mv SDL2-${SDL_VER} SDL2
+cd SDL2
 ./configure
 make -j "$(nproc)"
 sudo make install # SDL needs to be installed here because it is a dependency for the below

@@ -1,6 +1,6 @@
 #!/bin/sh -eu
 
-cd /var/tmp/sdl/SDL2-2.0.20
+cd /var/tmp/sdl/SDL2
 sudo make install
 cd ../SDL_mixer
 sudo make install
