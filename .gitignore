@@ -57,3 +57,10 @@ unittest/run_tests
 .clang-format
 compile_commands.json
 compile_flags.txt
+
+# delete these before merging
+*.data
+*.data.old
+notes-perf.md
+perf
+vid
