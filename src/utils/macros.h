@@ -110,5 +110,15 @@
         (strchr((tok), '=') != 0 && \
          strncmp(key, tok, strchr((tok), '=') - (tok)) == 0)
 
+// branch prediction hints from the Linux kernel, probably not going to be used
+#if defined __clang__ || defined __GNUC__
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define likely(x)   (x)
+#define unlikely(x) (x)
+#endif
+
+
 #endif // !defined UTILS_MACROS_H_1982D373_8862_4453_ADFB_33AECC853E48
 
