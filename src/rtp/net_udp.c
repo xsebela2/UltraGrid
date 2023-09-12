@@ -894,7 +894,11 @@ socket_udp *udp_init_if(const char *addr, const char *iface, uint16_t rx_port,
                         s->local->max_packets = atoi(get_commandline_param("udp-queue-len"));
                 }
                 platform_pipe_init(s->local->should_exit_fd);
+                cpu_set_t cpuset;
+                CPU_ZERO(&cpuset);
+                CPU_SET(1, &cpuset);
                 pthread_create(&s->local->thread_id, NULL, udp_reader, s);
+                pthread_setaffinity_np(s->local->thread_id, sizeof cpuset, &cpuset);
         }
 
         return s;
