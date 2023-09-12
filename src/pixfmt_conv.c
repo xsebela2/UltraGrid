@@ -50,6 +50,7 @@
  *
  */
 
+#include <bits/floatn-common.h>
 #define __STDC_WANT_LIB_EXT1__ 1
 
 #ifdef HAVE_CONFIG_H
@@ -771,6 +772,56 @@ static void vc_copylineRGBAtoRGBwithShift(unsigned char * __restrict dst2, const
         }
 }
 
+
+static void vc_copylineRGBAtoRGBalt(unsigned char * __restrict dst2, const unsigned char * __restrict src2, int dst_len, bool is_abgr)
+{
+	register const uint32_t * src = (const uint32_t *)(const void *) src2;
+	register uint32_t * dst = (uint32_t *)(void *) dst2;
+        int x;
+
+        const int rshift = is_abgr ? 16 : 0;
+        const int gshift = 8;
+        const int bshift = is_abgr ? 0 : 16;
+        
+        #define byte_swap(x)\
+                    ((x>>24) & 0x000000ff) |\
+                    ((x<<8)  & 0x00ff0000) |\
+                    ((x>>8)  & 0x0000ff00) |\
+                    ((x<<24) & 0xff000000)
+        
+        OPTIMIZED_FOR (x = 0; x <= dst_len - 12; x += 12) {
+		register uint32_t in1 = *src++;
+		register uint32_t in2 = *src++;
+		register uint32_t in3 = *src++;
+		register uint32_t in4 = *src++;
+
+                // ABGR -> RGBA
+                if (is_abgr) {
+                        in1 = byte_swap(in1);
+                        in2 = byte_swap(in2);
+                        in3 = byte_swap(in3);
+                        in4 = byte_swap(in4);
+                }
+                
+                // first RGB, second R
+                *dst++ = (in1 & 0x00ffffff) | (in2 << 24);
+                // second GB, third RG
+                *dst++ = ((in2 >> 8)  & 0x0000ffff) | (in3 << 16); 
+                // third B, fourth RGB
+                *dst++ = ((in3 >> 16) & 0x000000ff) | (in4 << 8);
+        }
+        
+        uint8_t *dst_c = (uint8_t *) dst;
+        for (; x <= dst_len - 3; x += 3) {
+		register uint32_t in = *src++;
+                *dst_c++ = (in >> rshift) & 0xff;
+                *dst_c++ = (in >> gshift) & 0xff;
+                *dst_c++ = (in >> bshift) & 0xff;
+        }
+}
+
+#define mycopyline 0
+
 /**
  * @brief Converts from AGBR to RGB
  * @copydetails vc_copylinev210
@@ -783,7 +834,11 @@ void vc_copylineABGRtoRGB(unsigned char * __restrict dst2, const unsigned char *
         UNUSED(gshift);
         UNUSED(bshift);
 
+        #if mycopyline
+        vc_copylineRGBAtoRGBalt(dst2, src2, dst_len, true);
+        #else
         vc_copylineRGBAtoRGBwithShift(dst2, src2, dst_len, 16, 8, 0);
+        #endif
 }
 
 /**
@@ -795,7 +850,11 @@ static void vc_copylineRGBAtoRGB(unsigned char * __restrict dst, const unsigned 
         UNUSED(rshift);
         UNUSED(gshift);
         UNUSED(bshift);
+        #if mycopyline
+        vc_copylineRGBAtoRGBalt(dst, src, dst_len, false);
+        #else
         vc_copylineRGBAtoRGBwithShift(dst, src, dst_len, 0, 8, 16);
+        #endif
 }
 
 /**
