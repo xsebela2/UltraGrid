@@ -61,6 +61,7 @@ compile_flags.txt
 # delete these before merging
 *.data
 *.data.old
+*.perfparser
 notes-perf.md
 perf
 vid
