@@ -88,11 +88,7 @@ struct wp_worker {
                 ret = pthread_cond_init(&m_task_completed_cv, NULL);
                 assert(ret == 0);
 
-                cpu_set_t cpuset;
-                CPU_ZERO(&cpuset);
-                CPU_SET(0, &cpuset);
                 ret = pthread_create(&m_thread_id, NULL, wp_worker::enter_loop, this);
-                pthread_setaffinity_np(m_thread_id, sizeof cpuset, &cpuset);
                 assert(ret == 0);
         }
         ~wp_worker() {

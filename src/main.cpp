@@ -1507,9 +1507,6 @@ int main(int argc, char *argv[])
                                 goto cleanup;
                         }
                         // init module here so as it is capable of receiving messages
-                        cpu_set_t cpuset;
-                        CPU_ZERO(&cpuset);
-                        CPU_SET(2, &cpuset);
                         if (pthread_create
                                         (&receiver_thread_id, NULL, video_rxtx::receiver_thread,
                                          (void *) uv.state_video_rxtx) != 0) {
@@ -1518,13 +1515,9 @@ int main(int argc, char *argv[])
                                 goto cleanup;
                         } else {
                                 receiver_thread_started = true;
-                                pthread_setaffinity_np(receiver_thread_id, sizeof(cpuset), &cpuset);
                         }
                 }
 
-                cpu_set_t cpuset;
-                CPU_ZERO(&cpuset);
-                CPU_SET(3, &cpuset);
                 if ((opt.video_rxtx_mode & MODE_SENDER) != 0U) {
                         if (pthread_create
                                         (&capture_thread_id, NULL, capture_thread,
@@ -1534,7 +1527,6 @@ int main(int argc, char *argv[])
                                 goto cleanup;
                         } else {
                                 capture_thread_started = true;
-                                pthread_setaffinity_np(capture_thread_id, sizeof(cpuset), &cpuset);
                         }
                 }
 
