@@ -795,15 +795,40 @@ static void vc_copylineRGBAtoRGB_SSE(unsigned char * __restrict dst2, const unsi
                 _mm_storeu_si128((__m128i *) (void *)dst, rgb);
                 dst += 3;
         }
-        
         const int rshift = is_abgr ? 16 : 0;
         const int gshift = 8;
         const int bshift = is_abgr ? 0 : 16;
-        vc_copylineRGBAtoRGBwithShift(dst2, src2, dst_len, rshift, gshift, bshift);
+        vc_copylineRGBAtoRGBwithShift(dst2, src2, dst_len, rshift, gshift, bshift);  // copy the rest
+}
+
+static void vc_copylineRGBAtoRGB_AVX(unsigned char * __restrict dst2, const unsigned char * __restrict src2, int dst_len, bool is_abgr)
+{
+        register const uint32_t * src = (const uint32_t *)(const void *) src2;
+        register uint32_t * dst = (uint32_t *)(void *) dst2;
+        int x;
+        
+        OPTIMIZED_FOR (x = 0; x <= dst_len - 24; x += 24) {
+                __m256i packed = _mm256_lddqu_si256((const __m256i *) (const void *)src);
+                src += 8;
+
+                if (is_abgr) {
+                        packed = _mm256_shuffle_epi32(packed, 0x1b); // 0b00 01 10 11
+                }
+                #define F 0xff
+                __m256i rgba2rgb = _mm256_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 
+                                                    16, 17, 18, 20, 21, 22, 24, 25, 26, 28, 29, 30, F, F, F, F, F, F, F, F);
+                __m256i rgb = _mm256_shuffle_epi8(packed, rgba2rgb);
+                _mm256_storeu_si256((__m256i *) (void *)dst, rgb);
+                dst += 6;
+        }
+        const int rshift = is_abgr ? 16 : 0;
+        const int gshift = 8;
+        const int bshift = is_abgr ? 0 : 16;
+        vc_copylineRGBAtoRGBwithShift(dst2, src2, dst_len, rshift, gshift, bshift); // copy the rest
 }
 #endif
 
-#define rgba_to_rgb_simd 1
+#define rgba_to_rgb_simd_bits 256
 
 /**
  * @brief Converts from AGBR to RGB
@@ -817,7 +842,9 @@ void vc_copylineABGRtoRGB(unsigned char * __restrict dst2, const unsigned char *
         UNUSED(gshift);
         UNUSED(bshift);
 
-#if rgba_to_rgb_simd
+#if rgba_to_rgb_simd_bits == 256
+        vc_copylineRGBAtoRGB_AVX(dst2, src2, dst_len, true);
+#elif rgba_to_rgb_simd_bits == 128
         vc_copylineRGBAtoRGB_SSE(dst2, src2, dst_len, true);
 #else
         vc_copylineRGBAtoRGBwithShift(dst2, src2, dst_len, 16, 8, 0);
@@ -833,7 +860,9 @@ static void vc_copylineRGBAtoRGB(unsigned char * __restrict dst, const unsigned 
         UNUSED(rshift);
         UNUSED(gshift);
         UNUSED(bshift);
-#if rgba_to_rgb_simd
+#if rgba_to_rgb_simd_bits == 256
+        vc_copylineRGBAtoRGB_AVX(dst, src, dst_len, false);
+#elif rgba_to_rgb_simd_bits == 128
         vc_copylineRGBAtoRGB_SSE(dst, src, dst_len, false);
 #else
         vc_copylineRGBAtoRGBwithShift(dst, src, dst_len, 0, 8, 16);
