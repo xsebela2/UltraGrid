@@ -931,6 +931,68 @@ static void rg48_to_yuv444p16le(AVFrame * __restrict out_frame, const unsigned c
         rg48_to_yuv444pXXle(16, out_frame, in_data, width, height);
 }
 
+
+
+#if 1 // -- broken --
+#include <immintrin.h>
+int hsum_epi32(__m128i x);
+int hsum_epi32(__m128i x){
+    x = _mm_hadd_epi32(x, x);
+    x = _mm_hadd_epi32(x, x);
+    return _mm_cvtsi128_si32(x);
+}
+
+static void
+rgb_to_yuv444p(AVFrame *__restrict out_frame,
+               const unsigned char *__restrict in_data, int width, int height)
+{
+
+        typedef uint8_t t; // in/out type
+        enum {
+                DEPTH = sizeof(t) * CHAR_BIT,
+        };
+        const ptrdiff_t src_linesize = vc_get_linesize(width, RGB);
+        for (ptrdiff_t y = 0; y < height; y++) {
+                const t *src =
+                    (const t *) (const void *) (in_data + y * src_linesize);
+                t *dst_y =
+                    (t *) (out_frame->data[0] + out_frame->linesize[0] * y);
+                t *dst_cb =
+                    (t *) (out_frame->data[1] + out_frame->linesize[1] * y);
+                t *dst_cr =
+                    (t *) (out_frame->data[2] + out_frame->linesize[2] * y);
+
+                OPTIMIZED_FOR(int x = 0; x < width; x++)
+                {
+                        __m128i rgbrgbrg = _mm_lddqu_si128((__m128i_u const*) (const void *)src);
+                        src += 3;
+                        #define F 0xff
+                        __m128i first_three = _mm_setr_epi8(0, F, F, F, 1, F, F, F, 2, F, F, F, F, F, F, F);
+                        // __m128i first_three = _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                        #undef F
+                        __m128i rgb_spread = _mm_shuffle_epi8(rgbrgbrg, first_three);
+                        __m128i yr_yg_yb = _mm_setr_epi32(Y_R, Y_G, Y_B, 0);
+
+                        __m128i rgb_to_y709_mul = _mm_mullo_epi32(rgb_spread, yr_yg_yb);  // r*yr g*yg b*yb 0*0
+                        int32_t mul = hsum_epi32(rgb_to_y709_mul); // sum
+                        __m128i mul4 = _mm_set1_epi32(mul); // sum sum sum sum
+
+                        __m128i rgb_to_y709 = _mm_srli_epi32(mul4, COMP_BASE); // >> on each
+                        __m128i normalize = _mm_setr_epi32(1 << (DEPTH-4), 1 << (DEPTH-1), 1 << (DEPTH-1), 0);
+                        __m128i res_ycbcr = _mm_add_epi32(rgb_to_y709, normalize); // + (1<<...) on each
+
+                        int32_t res[4]; 
+                        _mm_storeu_si128((__m128i_u *) res, res_ycbcr);
+                        
+                        *dst_y++  = CLAMP_LIMITED_Y(res[0], DEPTH);
+                        *dst_cb++ = CLAMP_LIMITED_Y(res[1], DEPTH);
+                        *dst_cr++ = CLAMP_LIMITED_Y(res[2], DEPTH);
+                }
+        }
+}
+// -- broken end --
+#else
+// -- original --
 static void
 rgb_to_yuv444p(AVFrame *__restrict out_frame,
                const unsigned char *__restrict in_data, int width, int height)
@@ -955,6 +1017,8 @@ rgb_to_yuv444p(AVFrame *__restrict out_frame,
                         const comp_type_t g = *src++;
                         const comp_type_t b = *src++;
 
+                        #define RGB_TO_Y_709_SCALED(r, g, b) ((r) * Y_R + (g) * Y_G + (b) * Y_B)
+
                         const comp_type_t res_y =
                             (RGB_TO_Y_709_SCALED(r, g, b) >> COMP_BASE) +
                             (1 << (DEPTH - 4));
@@ -971,6 +1035,7 @@ rgb_to_yuv444p(AVFrame *__restrict out_frame,
                 }
         }
 }
+#endif
 
 #if defined __GNUC__
 static inline void y216_to_yuv422pXXle(AVFrame * __restrict out_frame, const unsigned char * __restrict in_data, int width, int height, unsigned int depth)
