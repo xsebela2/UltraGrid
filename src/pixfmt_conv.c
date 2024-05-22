@@ -2083,6 +2083,20 @@ static void vc_copylineBGRtoUYVY(unsigned char * __restrict dst, const unsigned 
 }
 
 /**
+ * @brief Converts ABGR to UYVY.
+ * @copydetails vc_copylinev210
+ */
+static void vc_copylineABGRtoUYVY(unsigned char * __restrict dst, const unsigned char * __restrict src, int dst_len, int rshift,
+                int gshift, int bshift)
+{
+        UNUSED(rshift);
+        UNUSED(gshift);
+        UNUSED(bshift);
+        vc_copylineToUYVY709(dst, src, dst_len, 2, 1, 0, 4);
+}
+
+
+/**
  * @brief Converts RGBA to UYVY.
  * @copydetails vc_copylinev210
  *
@@ -2780,6 +2794,7 @@ static const struct decoder_item decoders[] = {
         { vc_copylineV210toY416,  v210,  Y416 },
         { vc_copylineV210toRGB,   v210,  RGB  },
         { vc_copylineV210toRG48,  v210,  RG48 },
+        { vc_copylineABGRtoUYVY,  ABGR,  UYVY },
 };
 
 /**

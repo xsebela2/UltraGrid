@@ -68,6 +68,7 @@ typedef enum {
         VIDEO_CODEC_FIRST,
         VC_FIRST = VIDEO_CODEC_FIRST,
         RGBA = VIDEO_CODEC_FIRST, ///< RGBA 8-bit, big-endian
+        ABGR,     /// RGBA 8-bit, little-endian
         UYVY,     ///< YCbCr 422 8-bit - Cb Y0 Cr Y1
         YUYV,     ///< YCbCr 422 8-bit - Y0 Cb Y1 Cr
         R10k,     ///< RGB 10-bit packed - RGBX, big-endian (2 bit padding)

@@ -39,6 +39,7 @@
  * The XGetImage() is a bit slow, consider using XShm as OBS does.
  */
 
+#include "pixfmt_conv.h"
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #include "config_unix.h"
@@ -157,7 +158,7 @@ static bool initialize(struct vidcap_screen_x11_state *s) {
 
         s->should_exit_worker = false;
 
-        s->frame->color_spec = RGB;
+        s->frame->color_spec = UYVY; // was RGB
         if(s->fps > 0.0) {
                 s->frame->fps = s->fps;
         } else {
@@ -448,7 +449,13 @@ static struct video_frame * vidcap_screen_x11_grab(void *state, struct audio_fra
          * some configurations, but seems to work currently. To be corrected if there is an
          * opposite case.
          */
-        parallel_pix_conv(s->tile->height, s->tile->data, vc_get_linesize(s->tile->width, RGB), &item->data->data[0], vc_get_linesize(s->tile->width, RGBA), vc_copylineABGRtoRGB, s->cpu_count);
+
+        decoder_t abgr_to_uyvy = get_decoder_from_to(ABGR, UYVY);
+        assert(abgr_to_uyvy != NULL);
+        // decoder_t abgr_to_rgb = get_decoder_from_to(ABGR, RGB);
+        
+        // parallel_pix_conv(s->tile->height, s->tile->data, vc_get_linesize(s->tile->width, RGB), &item->data->data[0], vc_get_linesize(s->tile->width, RGBA), vc_copylineABGRtoRGB, s->cpu_count);
+        parallel_pix_conv(s->tile->height, s->tile->data, vc_get_linesize(s->tile->width, UYVY), &item->data->data[0], vc_get_linesize(s->tile->width, RGBA), abgr_to_uyvy, s->cpu_count);
 
         XDestroyImage(item->data);
         free(item);
